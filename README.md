@@ -76,12 +76,18 @@ stop loss/take profit, stats, equity curve) without any real account.
    MT5_SERVER=Exness-MT5Trial
    ACCOUNT_TYPE=demo
    ```
-4. `pip install -r requirements-mt5.txt` on Windows (installs the Windows-only
+4. Check the exact **symbol name** your account uses: in MT5, click the
+   search box under Market Watch and type "EUR". Many brokers (e.g. Exness
+   Standard accounts) suffix symbols — you may see `EURUSDm` instead of plain
+   `EURUSD`. Use the exact, case-sensitive name in the dashboard's Settings
+   tab (Symbol field accepts free text) or `SYMBOL` in `.env`. Using the
+   wrong name causes MT5 calls to fail with `Terminal: Call failed`.
+5. `pip install -r requirements-mt5.txt` on Windows (installs the Windows-only
    `MetaTrader5` package — kept out of the main requirements.txt so it never
    blocks installing/running in mock mode).
-5. Restart the backend. The dashboard's connection dot should turn green and
+6. Restart the backend. The dashboard's connection dot should turn green and
    show your real Exness demo balance.
-6. Only after you've watched it trade correctly on demo for a while, switch
+7. Only after you've watched it trade correctly on demo for a while, switch
    `ACCOUNT_TYPE=real` (or use the dashboard's mode switch) to go live. Both the
    mode switch and the Start button require an explicit confirmation when
    switching to/starting on a real-money account — there is no accidental way

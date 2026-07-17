@@ -1,6 +1,16 @@
 import { useEffect, useState } from "react";
 
-const SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCHF", "USDCAD"];
+const SYMBOLS = [
+  "EURUSD",
+  "GBPUSD",
+  "USDJPY",
+  "AUDUSD",
+  "USDCHF",
+  "USDCAD",
+  "EURUSDm",
+  "GBPUSDm",
+  "USDJPYm",
+];
 const TIMEFRAMES = ["M1", "M5", "M15", "M30", "H1", "H4", "D1"];
 
 export default function SettingsPanel({ settings, running, onSave, saving }) {
@@ -44,14 +54,19 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
       {running && <p className="muted">Stop the bot to change settings.</p>}
       <form className="settings-form" onSubmit={handleSubmit}>
         <label>
-          Symbol
-          <select disabled={running} value={form.symbol} onChange={(e) => update("symbol", e.target.value)}>
+          Symbol (type your broker's exact name, e.g. EURUSDm)
+          <input
+            disabled={running}
+            list="symbol-suggestions"
+            type="text"
+            value={form.symbol}
+            onChange={(e) => update("symbol", e.target.value)}
+          />
+          <datalist id="symbol-suggestions">
             {SYMBOLS.map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
+              <option key={s} value={s} />
             ))}
-          </select>
+          </datalist>
         </label>
         <label>
           Timeframe
