@@ -82,13 +82,20 @@ class MT5Broker(BrokerAdapter):
             raise RuntimeError(f"MT5 account_info() failed: {self._mt5.last_error()}")
         return AccountInfo(balance=info.balance, equity=info.equity, currency=info.currency, leverage=info.leverage)
 
+    def _ensure_symbol_selected(self, symbol: str) -> None:
+        """Historical/tick data calls can fail with 'Terminal: Call failed' if the
+        symbol isn't currently visible in Market Watch. Not lock-decorated itself —
+        only ever called from inside an already-@_synchronized method (the lock
+        isn't reentrant, so double-acquiring it here would deadlock)."""
+        mt5 = self._mt5
+        if mt5.symbol_info(symbol) is None:
+            mt5.symbol_select(symbol, True)
+
     @_synchronized
     def get_symbol_info(self, symbol: str) -> SymbolInfo:
         mt5 = self._mt5
+        self._ensure_symbol_selected(symbol)
         info = mt5.symbol_info(symbol)
-        if info is None:
-            mt5.symbol_select(symbol, True)
-            info = mt5.symbol_info(symbol)
         if info is None:
             raise RuntimeError(f"Symbol {symbol} not found on this broker")
         pip_size = info.point * 10 if info.digits in (3, 5) else info.point
@@ -106,6 +113,7 @@ class MT5Broker(BrokerAdapter):
     @_synchronized
     def get_candles(self, symbol: str, timeframe: str, count: int) -> pd.DataFrame:
         mt5 = self._mt5
+        self._ensure_symbol_selected(symbol)
         tf = _TIMEFRAME_MAP.get(timeframe, mt5.TIMEFRAME_M15)
         rates = mt5.copy_rates_from_pos(symbol, tf, 0, count)
         if rates is None or len(rates) == 0:
@@ -117,6 +125,7 @@ class MT5Broker(BrokerAdapter):
 
     @_synchronized
     def get_current_price(self, symbol: str) -> float:
+        self._ensure_symbol_selected(symbol)
         tick = self._mt5.symbol_info_tick(symbol)
         if tick is None:
             raise RuntimeError(f"MT5 symbol_info_tick failed for {symbol}: {self._mt5.last_error()}")
