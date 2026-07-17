@@ -1,13 +1,13 @@
-fastapi==0.115.0
-uvicorn[standard]==0.30.6
-pydantic==2.9.2
-pydantic-settings==2.5.2
-SQLAlchemy==2.0.35
-pandas==2.2.3
-numpy==2.1.1
-python-dotenv==1.0.1
-yfinance==0.2.43
-websockets==13.1
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.6
+pydantic>=2.9.2
+pydantic-settings>=2.5.2
+SQLAlchemy>=2.0.35
+pandas>=2.2.3
+numpy>=2.1.1
+python-dotenv>=1.0.1
+yfinance>=0.2.43
+websockets>=13.1
 
 # Only installs on Windows. Required for real Exness/MT5 trading (not needed for mock/demo mode).
 MetaTrader5==5.0.4874 ; sys_platform == "win32"
