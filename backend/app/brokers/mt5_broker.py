@@ -181,3 +181,20 @@ class MT5Broker(BrokerAdapter):
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
             raise RuntimeError(f"MT5 close order_send failed: {result}")
         return pos.profit
+
+    def modify_stop_loss(self, ticket: str, new_sl: float) -> None:
+        mt5 = self._mt5
+        positions = mt5.positions_get(ticket=int(ticket))
+        if not positions:
+            return
+        pos = positions[0]
+        request = {
+            "action": mt5.TRADE_ACTION_SLTP,
+            "symbol": pos.symbol,
+            "position": pos.ticket,
+            "sl": new_sl,
+            "tp": pos.tp,
+        }
+        result = mt5.order_send(request)
+        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+            raise RuntimeError(f"MT5 modify stop loss failed: {result}")

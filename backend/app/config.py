@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     take_profit_pips: float = 40
     max_open_trades: int = 1
     max_daily_loss_percent: float = 5.0
+    max_daily_trades: int = 0  # 0 = unlimited
+    breakeven_trigger_pips: float = 0  # 0 = disabled
+    trailing_stop_pips: float = 0  # 0 = breakeven only, no further trailing
     poll_interval_seconds: int = 30
 
     database_url: str = "sqlite:///./trading_bot.db"

@@ -93,6 +93,11 @@ stop loss/take profit, stats, equity curve) without any real account.
 - **Max Open Trades** — caps concurrent positions.
 - **Max Daily Loss (%)** — if the account's equity drops this much below where
   it started the day, the bot stops opening new trades for the rest of the day.
+- **Max Daily Trades** — caps how many new trades can open per day (0 = unlimited).
+- **Breakeven Trigger / Trailing Stop (pips)** — once a trade is far enough in
+  profit, its stop loss automatically moves to entry (can no longer lose money)
+  and then trails behind price, locking in more profit as it keeps moving your
+  way. Set Breakeven Trigger to 0 to disable both.
 
 These are enforced in `app/risk/risk_manager.py` and cannot be bypassed by the
 strategy — a BUY/SELL signal only reaches the broker if the risk manager
@@ -124,3 +129,5 @@ Always backtest a change before running it live.
   not for judging real profitability. Use the backtester (real historical
   data) for that.
 - No user accounts/auth yet — this runs as a single-user local tool.
+- The backtester doesn't simulate breakeven/trailing stop yet — it uses the
+  fixed SL/TP from Settings. Trailing only applies to live/demo/real trading.

@@ -28,6 +28,9 @@ export default function StatCards({ account, stats, liveOpenPositions }) {
       <Card label="Win Rate" value={`${winRate}%`} />
       <Card label="Open Trades" value={openCount} />
       <Card label="Total Trades" value={stats?.total_trades ?? 0} />
+      <Card label="Avg Win" value={fmt(stats?.avg_win ?? 0)} tone="tone-green" />
+      <Card label="Avg Loss" value={fmt(-(stats?.avg_loss ?? 0))} tone="tone-red" />
+      <Card label="Profit Factor" value={stats?.profit_factor ?? "—"} />
     </div>
   );
 }

@@ -83,6 +83,11 @@ def get_stats():
         wins = [r for r in decided if r.profit > 0]
         losses = [r for r in decided if r.profit <= 0]
         total_profit = sum(r.profit or 0 for r in closed)
+        gross_profit = sum(r.profit for r in wins)
+        gross_loss = abs(sum(r.profit for r in losses))
+        avg_win = round(gross_profit / len(wins), 2) if wins else 0
+        avg_loss = round(gross_loss / len(losses), 2) if losses else 0
+        profit_factor = round(gross_profit / gross_loss, 2) if gross_loss else None
         today_records = [r for r in closed if r.close_time and r.close_time.date() == date.today()]
         today_profit = sum(r.profit or 0 for r in today_records)
 
@@ -102,6 +107,9 @@ def get_stats():
             "total_profit": round(total_profit, 2),
             "today_profit": round(today_profit, 2),
             "open_trades": open_count,
+            "avg_win": avg_win,
+            "avg_loss": avg_loss,
+            "profit_factor": profit_factor,
             "equity_curve": equity_curve,
         }
 

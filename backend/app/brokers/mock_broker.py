@@ -186,3 +186,8 @@ class MockBroker(BrokerAdapter):
         profit = self._unrealized_profit(pos)
         self._balance += profit
         return profit
+
+    def modify_stop_loss(self, ticket: str, new_sl: float) -> None:
+        pos = self._positions.get(ticket)
+        if pos is not None:
+            pos.sl = new_sl

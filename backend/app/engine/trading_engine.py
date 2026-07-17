@@ -84,6 +84,8 @@ class TradingEngine:
         self._sync_closed_positions(open_positions, account.balance - balance_before)
 
         symbol_info = self.broker.get_symbol_info(self.symbol)
+        current_price = self.broker.get_current_price(self.symbol)
+        open_positions = self._apply_trailing_stop(open_positions, current_price, symbol_info.pip_size)
 
         decision = self.risk_manager.evaluate(
             balance=account.balance,
@@ -99,6 +101,7 @@ class TradingEngine:
             side = OrderSide.BUY if result.signal == Signal.BUY else OrderSide.SELL
             sl, tp = self.risk_manager.compute_sl_tp(result.close, side.value, symbol_info.pip_size)
             position = self.broker.place_order(self.symbol, side, decision.volume, sl, tp)
+            self.risk_manager.record_trade_opened()
             self._log_new_trade(position)
             open_positions = open_positions + [position]
 
@@ -106,6 +109,25 @@ class TradingEngine:
             self._last_known_profit[p.ticket] = p.profit
 
         self._broadcast(account, open_positions, result, decision)
+
+    def _apply_trailing_stop(self, open_positions: list[Position], current_price: float, pip_size: float) -> list[Position]:
+        """Moves each open position's stop loss to breakeven/trailing once it
+        qualifies (see RiskManager.compute_trailing_sl). Disabled entirely when
+        breakeven_trigger_pips is 0 (the default)."""
+        for p in open_positions:
+            new_sl = self.risk_manager.compute_trailing_sl(p.side.value, p.open_price, p.sl, current_price, pip_size)
+            if new_sl is not None:
+                self.broker.modify_stop_loss(p.ticket, new_sl)
+                p.sl = new_sl
+                self._update_trade_sl(p.ticket, new_sl)
+        return open_positions
+
+    def _update_trade_sl(self, ticket: str, new_sl: float) -> None:
+        with SessionLocal() as session:
+            record = session.query(TradeRecord).filter_by(ticket=ticket, status="OPEN").first()
+            if record:
+                record.sl = new_sl
+                session.commit()
 
     def _sync_closed_positions(self, current_open: list[Position], realized_delta: float) -> None:
         """Any ticket we knew about last tick that is no longer open (SL/TP hit,

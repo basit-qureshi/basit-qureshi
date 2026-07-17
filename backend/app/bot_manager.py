@@ -25,6 +25,9 @@ class BotManager:
             "take_profit_pips": settings.take_profit_pips,
             "max_open_trades": settings.max_open_trades,
             "max_daily_loss_percent": settings.max_daily_loss_percent,
+            "max_daily_trades": settings.max_daily_trades,
+            "breakeven_trigger_pips": settings.breakeven_trigger_pips,
+            "trailing_stop_pips": settings.trailing_stop_pips,
             "poll_interval_seconds": settings.poll_interval_seconds,
             "mode": settings.account_type,
         }
@@ -40,6 +43,9 @@ class BotManager:
             take_profit_pips=s["take_profit_pips"],
             max_open_trades=s["max_open_trades"],
             max_daily_loss_percent=s["max_daily_loss_percent"],
+            max_daily_trades=s["max_daily_trades"],
+            breakeven_trigger_pips=s["breakeven_trigger_pips"],
+            trailing_stop_pips=s["trailing_stop_pips"],
         )
         return TradingEngine(
             broker=self.broker,

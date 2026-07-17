@@ -26,6 +26,9 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
       take_profit_pips: Number(form.take_profit_pips),
       max_open_trades: Number(form.max_open_trades),
       max_daily_loss_percent: Number(form.max_daily_loss_percent),
+      max_daily_trades: Number(form.max_daily_trades),
+      breakeven_trigger_pips: Number(form.breakeven_trigger_pips),
+      trailing_stop_pips: Number(form.trailing_stop_pips),
       poll_interval_seconds: Number(form.poll_interval_seconds),
     });
   }
@@ -33,6 +36,11 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
   return (
     <div className="panel">
       <h3>Strategy &amp; Risk Settings</h3>
+      <p className="muted">
+        Breakeven/Trailing: once a trade is this many pips in profit, its stop loss auto-moves to your entry price
+        (can't turn into a loss anymore), then keeps trailing behind price by the trailing pips as it keeps moving
+        your way — locking in more profit automatically. Leave at 0 to disable.
+      </p>
       {running && <p className="muted">Stop the bot to change settings.</p>}
       <form className="settings-form" onSubmit={handleSubmit}>
         <label>
@@ -106,6 +114,36 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
             min="1"
             value={form.max_daily_loss_percent}
             onChange={(e) => update("max_daily_loss_percent", e.target.value)}
+          />
+        </label>
+        <label>
+          Max Daily Trades (0 = unlimited)
+          <input
+            disabled={running}
+            type="number"
+            min="0"
+            value={form.max_daily_trades}
+            onChange={(e) => update("max_daily_trades", e.target.value)}
+          />
+        </label>
+        <label>
+          Breakeven Trigger (pips, 0 = off)
+          <input
+            disabled={running}
+            type="number"
+            min="0"
+            value={form.breakeven_trigger_pips}
+            onChange={(e) => update("breakeven_trigger_pips", e.target.value)}
+          />
+        </label>
+        <label>
+          Trailing Stop (pips, 0 = breakeven only)
+          <input
+            disabled={running}
+            type="number"
+            min="0"
+            value={form.trailing_stop_pips}
+            onChange={(e) => update("trailing_stop_pips", e.target.value)}
           />
         </label>
         <label>

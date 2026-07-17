@@ -78,3 +78,8 @@ class BrokerAdapter(ABC):
 
     @abstractmethod
     def get_current_price(self, symbol: str) -> float: ...
+
+    @abstractmethod
+    def modify_stop_loss(self, ticket: str, new_sl: float) -> None:
+        """Moves an open position's stop loss (used for breakeven/trailing stop)."""
+        ...

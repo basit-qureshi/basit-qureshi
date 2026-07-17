@@ -13,6 +13,9 @@ class SettingsUpdate(BaseModel):
     take_profit_pips: float | None = None
     max_open_trades: int | None = None
     max_daily_loss_percent: float | None = None
+    max_daily_trades: int | None = None
+    breakeven_trigger_pips: float | None = None
+    trailing_stop_pips: float | None = None
     poll_interval_seconds: int | None = None
 
 
