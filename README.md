@@ -3,7 +3,9 @@
 An automated forex trading bot: connects to a broker (Exness via MetaTrader5, or a
 built-in simulated broker for testing), watches the market with a rule-based
 strategy, and — only within risk limits you set — places, manages, and closes
-trades automatically. A React dashboard shows live stats, open positions, trade
+trades automatically. A React dashboard shows a live TradingView-style
+candlestick chart (with the EMA fast/slow lines the strategy actually uses,
+plus markers for every trade entry), live stats, open positions, trade
 history, and an equity curve, and lets you backtest the strategy on historical
 data before ever risking money.
 

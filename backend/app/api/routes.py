@@ -1,5 +1,6 @@
 from datetime import date
 
+import pandas as pd
 from fastapi import APIRouter, HTTPException
 
 from app.api.schemas import BacktestRequest, ModeUpdate, SettingsUpdate, StartRequest
@@ -8,6 +9,7 @@ from app.bot_manager import bot_manager
 from app.db import SessionLocal, TradeRecord
 from app.risk.risk_manager import RiskManager
 from app.strategy.ema_rsi_strategy import EmaRsiStrategy
+from app.strategy.indicators import ema
 
 router = APIRouter(prefix="/api")
 
@@ -112,6 +114,40 @@ def get_stats():
             "profit_factor": profit_factor,
             "equity_curve": equity_curve,
         }
+
+
+@router.get("/candles")
+def get_candles(count: int = 200):
+    engine = bot_manager.engine
+    if not engine.broker.is_connected():
+        engine.broker.connect()
+    df = engine.broker.get_candles(engine.symbol, engine.timeframe, count)
+    closes = df["close"]
+    ema_fast = ema(closes, engine.strategy.ema_fast_period)
+    ema_slow = ema(closes, engine.strategy.ema_slow_period)
+
+    # Truncating to whole seconds can make two distinct timestamps collide
+    # (e.g. a synthetic candle generated a fraction of a second after the
+    # previous one). The chart library requires strictly increasing times,
+    # so bump any collision forward by a second rather than dropping data.
+    times: list[int] = []
+    for t in df.index:
+        ts = int(pd.Timestamp(t).timestamp())
+        if times and ts <= times[-1]:
+            ts = times[-1] + 1
+        times.append(ts)
+
+    candles = [
+        {"time": t, "open": float(o), "high": float(h), "low": float(l), "close": float(c)}
+        for t, o, h, l, c in zip(times, df["open"], df["high"], df["low"], df["close"])
+    ]
+    return {
+        "symbol": engine.symbol,
+        "timeframe": engine.timeframe,
+        "candles": candles,
+        "ema_fast": [{"time": t, "value": float(v)} for t, v in zip(times, ema_fast)],
+        "ema_slow": [{"time": t, "value": float(v)} for t, v in zip(times, ema_slow)],
+    }
 
 
 @router.get("/settings")

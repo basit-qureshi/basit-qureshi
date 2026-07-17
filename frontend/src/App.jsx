@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { api, connectWebSocket } from "./api";
 import StatusBar from "./components/StatusBar";
 import StatCards from "./components/StatCards";
+import LiveChart from "./components/LiveChart";
 import EquityChart from "./components/EquityChart";
 import TradesTable from "./components/TradesTable";
 import SettingsPanel from "./components/SettingsPanel";
@@ -119,6 +120,8 @@ export default function App() {
       {tab === "dashboard" && (
         <>
           <StatCards account={liveAccount || status?.account} stats={stats} liveOpenPositions={liveOpenPositions} />
+
+          <LiveChart trades={trades} />
 
           {lastSignal && (
             <div className="panel signal-panel">

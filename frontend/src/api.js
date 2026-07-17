@@ -18,6 +18,7 @@ export const api = {
     request("/api/start", { method: "POST", body: JSON.stringify({ confirm_real: confirmReal }) }),
   stop: () => request("/api/stop", { method: "POST" }),
   getTrades: (limit = 100) => request(`/api/trades?limit=${limit}`),
+  getCandles: (count = 200) => request(`/api/candles?count=${count}`),
   getStats: () => request("/api/stats"),
   getSettings: () => request("/api/settings"),
   updateSettings: (settings) => request("/api/settings", { method: "POST", body: JSON.stringify(settings) }),

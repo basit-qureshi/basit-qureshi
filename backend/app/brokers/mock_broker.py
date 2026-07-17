@@ -1,3 +1,4 @@
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -38,9 +39,14 @@ class MockBroker(BrokerAdapter):
     Runs anywhere with no external dependency, so the whole bot can be
     exercised end-to-end before ever touching a real Exness/MT5 account.
 
-    Price only ever changes in one place (`_advance`, driven by `get_candles`)
-    so every other method (current price, SL/TP checks, unrealized P&L) reads
-    a single consistent price instead of each doing its own random walk.
+    Price only ever changes in one place (`_advance`) so every other method
+    (current price, SL/TP checks, unrealized P&L) reads a single consistent
+    price instead of each doing its own random walk. `_advance` is throttled
+    to real wall-clock time (`_advance_interval_seconds`) rather than firing
+    on every `get_candles` call, so reading candles from multiple places at
+    once (the trading engine's poll loop, a chart polling for live updates)
+    never over-drives the simulated market — same as a real broker, where
+    time passes on its own regardless of how often you check the price.
     """
 
     def __init__(self, starting_balance: float = 10_000.0, currency: str = "USD", leverage: int = 100):
@@ -51,6 +57,8 @@ class MockBroker(BrokerAdapter):
         self._positions: dict[str, Position] = {}
         self._prices: dict[str, float] = {}
         self._candle_cache: dict[str, pd.DataFrame] = {}
+        self._last_advance_time: dict[str, float] = {}
+        self._advance_interval_seconds = 5.0
         self._rng = np.random.default_rng(7)
 
     def connect(self) -> None:
@@ -117,7 +125,10 @@ class MockBroker(BrokerAdapter):
 
     def get_candles(self, symbol: str, timeframe: str, count: int) -> pd.DataFrame:
         self._ensure_history(symbol, count)
-        self._advance(symbol)
+        now = time.time()
+        if now - self._last_advance_time.get(symbol, 0.0) >= self._advance_interval_seconds:
+            self._advance(symbol)
+            self._last_advance_time[symbol] = now
         return self._candle_cache[symbol].tail(count)
 
     def _unrealized_profit(self, pos: Position) -> float:
