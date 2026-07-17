@@ -7,5 +7,6 @@ backend/test_engine.db
 
 frontend/node_modules/
 frontend/dist/
+frontend/package-lock.json
 
 .DS_Store
