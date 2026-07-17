@@ -74,8 +74,9 @@ stop loss/take profit, stats, equity curve) without any real account.
    MT5_SERVER=Exness-MT5Trial
    ACCOUNT_TYPE=demo
    ```
-4. `pip install -r requirements.txt` again on Windows (this installs the
-   Windows-only `MetaTrader5` package this time).
+4. `pip install -r requirements-mt5.txt` on Windows (installs the Windows-only
+   `MetaTrader5` package — kept out of the main requirements.txt so it never
+   blocks installing/running in mock mode).
 5. Restart the backend. The dashboard's connection dot should turn green and
    show your real Exness demo balance.
 6. Only after you've watched it trade correctly on demo for a while, switch

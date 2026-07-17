@@ -1,0 +1,3 @@
+# Install this ONLY when you're ready to connect to a real Exness/MT5 account
+# (BROKER_MODE=mt5 in .env). Windows only — pip install -r requirements-mt5.txt
+MetaTrader5

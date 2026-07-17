@@ -8,6 +8,3 @@ numpy>=2.1.1
 python-dotenv>=1.0.1
 yfinance>=0.2.43
 websockets>=13.1
-
-# Only installs on Windows. Required for real Exness/MT5 trading (not needed for mock/demo mode).
-MetaTrader5==5.0.4874 ; sys_platform == "win32"
