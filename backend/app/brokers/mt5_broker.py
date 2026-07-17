@@ -1,4 +1,6 @@
+import threading
 from datetime import datetime, timezone
+from functools import wraps
 
 import pandas as pd
 
@@ -21,6 +23,21 @@ _TIMEFRAME_MAP = {
 }
 
 
+def _synchronized(method):
+    """The MetaTrader5 package is not thread-safe — it talks to the terminal over
+    a single shared IPC connection. FastAPI's sync routes run on threadpool
+    threads while the trading engine's poll loop runs on the main thread, so
+    without this lock, two concurrent MT5 calls can hang the process forever
+    (requests stuck pending indefinitely) instead of erroring."""
+
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class MT5Broker(BrokerAdapter):
     """Real broker connection via the MetaTrader5 terminal (works with Exness or any MT5 broker).
 
@@ -41,13 +58,16 @@ class MT5Broker(BrokerAdapter):
         self._password = password
         self._server = server
         self._connected = False
+        self._lock = threading.Lock()
 
+    @_synchronized
     def connect(self) -> None:
         mt5 = self._mt5
         if not mt5.initialize(login=self._login, password=self._password, server=self._server):
             raise RuntimeError(f"MT5 initialize() failed: {mt5.last_error()}")
         self._connected = True
 
+    @_synchronized
     def disconnect(self) -> None:
         self._mt5.shutdown()
         self._connected = False
@@ -55,12 +75,14 @@ class MT5Broker(BrokerAdapter):
     def is_connected(self) -> bool:
         return self._connected
 
+    @_synchronized
     def get_account_info(self) -> AccountInfo:
         info = self._mt5.account_info()
         if info is None:
             raise RuntimeError(f"MT5 account_info() failed: {self._mt5.last_error()}")
         return AccountInfo(balance=info.balance, equity=info.equity, currency=info.currency, leverage=info.leverage)
 
+    @_synchronized
     def get_symbol_info(self, symbol: str) -> SymbolInfo:
         mt5 = self._mt5
         info = mt5.symbol_info(symbol)
@@ -81,6 +103,7 @@ class MT5Broker(BrokerAdapter):
             volume_step=info.volume_step,
         )
 
+    @_synchronized
     def get_candles(self, symbol: str, timeframe: str, count: int) -> pd.DataFrame:
         mt5 = self._mt5
         tf = _TIMEFRAME_MAP.get(timeframe, mt5.TIMEFRAME_M15)
@@ -92,12 +115,14 @@ class MT5Broker(BrokerAdapter):
         df = df.set_index("time").rename(columns={"tick_volume": "volume"})
         return df[["open", "high", "low", "close", "volume"]]
 
+    @_synchronized
     def get_current_price(self, symbol: str) -> float:
         tick = self._mt5.symbol_info_tick(symbol)
         if tick is None:
             raise RuntimeError(f"MT5 symbol_info_tick failed for {symbol}: {self._mt5.last_error()}")
         return (tick.bid + tick.ask) / 2
 
+    @_synchronized
     def get_open_positions(self, symbol: str | None = None) -> list[Position]:
         mt5 = self._mt5
         raw = mt5.positions_get(symbol=symbol) if symbol else mt5.positions_get()
@@ -121,6 +146,7 @@ class MT5Broker(BrokerAdapter):
             )
         return result
 
+    @_synchronized
     def place_order(self, symbol: str, side: OrderSide, volume: float, sl: float, tp: float) -> Position:
         mt5 = self._mt5
         tick = mt5.symbol_info_tick(symbol)
@@ -155,6 +181,7 @@ class MT5Broker(BrokerAdapter):
             profit=0.0,
         )
 
+    @_synchronized
     def close_position(self, ticket: str) -> float:
         mt5 = self._mt5
         positions = mt5.positions_get(ticket=int(ticket))
@@ -182,6 +209,7 @@ class MT5Broker(BrokerAdapter):
             raise RuntimeError(f"MT5 close order_send failed: {result}")
         return pos.profit
 
+    @_synchronized
     def modify_stop_loss(self, ticket: str, new_sl: float) -> None:
         mt5 = self._mt5
         positions = mt5.positions_get(ticket=int(ticket))
