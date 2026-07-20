@@ -3,9 +3,10 @@ from datetime import date
 import pandas as pd
 from fastapi import APIRouter, HTTPException
 
-from app.api.schemas import BacktestRequest, ModeUpdate, SettingsUpdate, StartRequest
+from app.api.schemas import BacktestRequest, ModeUpdate, SettingsUpdate, StartRequest, TestOrderRequest
 from app.backtest.backtester import run_backtest
 from app.bot_manager import bot_manager
+from app.brokers.base import OrderSide
 from app.db import SessionLocal, TradeRecord
 from app.risk.risk_manager import RiskManager
 from app.strategy.ema_rsi_strategy import EmaRsiStrategy
@@ -176,6 +177,48 @@ def set_mode(body: ModeUpdate):
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     return {"ok": True, "mode": body.mode}
+
+
+@router.post("/test-order")
+def test_order(body: TestOrderRequest):
+    """Places a market order directly (no strategy, no risk manager) for
+    connectivity testing — e.g. confirming the broker/account can actually
+    execute trades before trusting the automated bot to do it. Optional
+    sl/tp so it's not left with no protection if used on a real account.
+    """
+    if body.side not in ("BUY", "SELL"):
+        raise HTTPException(status_code=400, detail="side must be 'BUY' or 'SELL'")
+    engine = bot_manager.engine
+    if engine.mode == "real" and not body.confirm_real:
+        raise HTTPException(
+            status_code=403, detail="Placing a manual order on a REAL account requires confirm_real=true"
+        )
+    if not engine.broker.is_connected():
+        engine.broker.connect()
+
+    side = OrderSide.BUY if body.side == "BUY" else OrderSide.SELL
+    try:
+        position = engine.broker.place_order(engine.symbol, side, body.volume, 0.0, 0.0)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    with SessionLocal() as session:
+        session.add(
+            TradeRecord(
+                ticket=position.ticket,
+                symbol=position.symbol,
+                side=position.side.value,
+                volume=position.volume,
+                open_price=position.open_price,
+                sl=position.sl,
+                tp=position.tp,
+                mode=engine.mode,
+                status="OPEN",
+            )
+        )
+        session.commit()
+
+    return {"ok": True, "ticket": position.ticket, "open_price": position.open_price}
 
 
 @router.post("/backtest")

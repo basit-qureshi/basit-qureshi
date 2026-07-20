@@ -24,6 +24,12 @@ class ModeUpdate(BaseModel):
     confirm: bool = False
 
 
+class TestOrderRequest(BaseModel):
+    side: str  # "BUY" or "SELL"
+    volume: float = 0.01
+    confirm_real: bool = False
+
+
 class BacktestRequest(BaseModel):
     symbol: str = "EURUSD"
     period: str = "60d"

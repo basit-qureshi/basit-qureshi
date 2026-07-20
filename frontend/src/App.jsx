@@ -7,6 +7,7 @@ import EquityChart from "./components/EquityChart";
 import TradesTable from "./components/TradesTable";
 import SettingsPanel from "./components/SettingsPanel";
 import BacktestPanel from "./components/BacktestPanel";
+import ManualTestPanel from "./components/ManualTestPanel";
 import "./App.css";
 
 export default function App() {
@@ -122,6 +123,8 @@ export default function App() {
           <StatCards account={liveAccount || status?.account} stats={stats} liveOpenPositions={liveOpenPositions} />
 
           <LiveChart trades={trades} />
+
+          <ManualTestPanel mode={status?.mode} onOrderPlaced={refresh} />
 
           {lastSignal && (
             <div className="panel signal-panel">

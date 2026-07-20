@@ -25,6 +25,8 @@ export const api = {
   setMode: (mode, confirm = false) =>
     request("/api/mode", { method: "POST", body: JSON.stringify({ mode, confirm }) }),
   runBacktest: (params) => request("/api/backtest", { method: "POST", body: JSON.stringify(params) }),
+  testOrder: (side, volume = 0.01, confirmReal = false) =>
+    request("/api/test-order", { method: "POST", body: JSON.stringify({ side, volume, confirm_real: confirmReal }) }),
 };
 
 export function connectWebSocket(onMessage) {
