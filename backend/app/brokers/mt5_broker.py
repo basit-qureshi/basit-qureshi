@@ -102,12 +102,20 @@ class MT5Broker(BrokerAdapter):
         tick_value = info.trade_tick_value or 1.0
         tick_size = info.trade_tick_size or info.point
         pip_value_per_lot = (pip_size / tick_size) * tick_value if tick_size else tick_value * 10
+        # Broker's minimum SL/TP distance from the current price, in price units.
+        # A tighter stop than this gets rejected with "Invalid stops" — Gold and
+        # other non-forex-major symbols often require a much wider distance than
+        # forex pairs do. A few extra points of buffer avoids rejections from
+        # rounding/price movement between our calculation and the order reaching MT5.
+        stops_level_points = getattr(info, "trade_stops_level", 0) or 0
+        min_stop_distance = (stops_level_points + 5) * info.point if stops_level_points else 0.0
         return SymbolInfo(
             symbol=symbol,
             pip_size=pip_size,
             pip_value_per_lot=pip_value_per_lot,
             min_volume=info.volume_min,
             volume_step=info.volume_step,
+            min_stop_distance=min_stop_distance,
         )
 
     @_synchronized

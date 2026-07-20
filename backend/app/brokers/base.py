@@ -38,6 +38,7 @@ class SymbolInfo:
     pip_value_per_lot: float  # profit/loss per pip per 1.0 lot, in account currency
     min_volume: float
     volume_step: float
+    min_stop_distance: float = 0.0  # broker's minimum SL/TP distance from price, in price units
 
 
 class BrokerAdapter(ABC):

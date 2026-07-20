@@ -86,20 +86,33 @@ class RiskManager:
 
         return RiskDecision(True, "ok", volume=volume)
 
-    def compute_sl_tp(self, entry_price: float, side: str, pip_size: float) -> tuple[float, float]:
-        distance_sl = self.stop_loss_pips * pip_size
-        distance_tp = self.take_profit_pips * pip_size
+    def compute_sl_tp(
+        self, entry_price: float, side: str, pip_size: float, min_stop_distance: float = 0.0
+    ) -> tuple[float, float]:
+        # Some symbols (e.g. Gold) enforce a broker-side minimum distance between
+        # price and SL/TP that can be wider than a "normal" pip-based stop —
+        # widen ours to at least that instead of letting the broker reject the order.
+        distance_sl = max(self.stop_loss_pips * pip_size, min_stop_distance)
+        distance_tp = max(self.take_profit_pips * pip_size, min_stop_distance)
         if side == "BUY":
             return entry_price - distance_sl, entry_price + distance_tp
         return entry_price + distance_sl, entry_price - distance_tp
 
     def compute_trailing_sl(
-        self, side: str, entry_price: float, current_sl: float, current_price: float, pip_size: float
+        self,
+        side: str,
+        entry_price: float,
+        current_sl: float,
+        current_price: float,
+        pip_size: float,
+        min_stop_distance: float = 0.0,
     ) -> float | None:
         """Returns a new stop-loss price once the trade is far enough in profit
         (breakeven_trigger_pips), optionally trailing behind by trailing_stop_pips
         as price keeps moving favorably. Returns None if no change is needed.
-        The stop loss only ever moves in the profit-protecting direction.
+        The stop loss only ever moves in the profit-protecting direction, and is
+        kept at least min_stop_distance away from the current price so the
+        broker doesn't reject the modification with "Invalid stops".
         """
         if self.breakeven_trigger_pips <= 0:
             return None
@@ -116,7 +129,11 @@ class RiskManager:
 
         if side == "BUY":
             candidate_sl = entry_price + locked_pips * pip_size
+            if min_stop_distance:
+                candidate_sl = min(candidate_sl, current_price - min_stop_distance)
             return candidate_sl if candidate_sl > current_sl else None
         else:
             candidate_sl = entry_price - locked_pips * pip_size
+            if min_stop_distance:
+                candidate_sl = max(candidate_sl, current_price + min_stop_distance)
             return candidate_sl if candidate_sl < current_sl else None

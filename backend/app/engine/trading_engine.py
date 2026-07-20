@@ -86,7 +86,9 @@ class TradingEngine:
 
         symbol_info = self.broker.get_symbol_info(self.symbol)
         current_price = self.broker.get_current_price(self.symbol)
-        open_positions = self._apply_trailing_stop(open_positions, current_price, symbol_info.pip_size)
+        open_positions = self._apply_trailing_stop(
+            open_positions, current_price, symbol_info.pip_size, symbol_info.min_stop_distance
+        )
 
         decision = self.risk_manager.evaluate(
             balance=account.balance,
@@ -100,7 +102,9 @@ class TradingEngine:
 
         if result.signal != Signal.NONE and decision.allowed:
             side = OrderSide.BUY if result.signal == Signal.BUY else OrderSide.SELL
-            sl, tp = self.risk_manager.compute_sl_tp(result.close, side.value, symbol_info.pip_size)
+            sl, tp = self.risk_manager.compute_sl_tp(
+                result.close, side.value, symbol_info.pip_size, symbol_info.min_stop_distance
+            )
             position = self.broker.place_order(self.symbol, side, decision.volume, sl, tp)
             self.risk_manager.record_trade_opened()
             self._log_new_trade(position)
@@ -111,12 +115,16 @@ class TradingEngine:
 
         self._broadcast(account, open_positions, result, decision)
 
-    def _apply_trailing_stop(self, open_positions: list[Position], current_price: float, pip_size: float) -> list[Position]:
+    def _apply_trailing_stop(
+        self, open_positions: list[Position], current_price: float, pip_size: float, min_stop_distance: float
+    ) -> list[Position]:
         """Moves each open position's stop loss to breakeven/trailing once it
         qualifies (see RiskManager.compute_trailing_sl). Disabled entirely when
         breakeven_trigger_pips is 0 (the default)."""
         for p in open_positions:
-            new_sl = self.risk_manager.compute_trailing_sl(p.side.value, p.open_price, p.sl, current_price, pip_size)
+            new_sl = self.risk_manager.compute_trailing_sl(
+                p.side.value, p.open_price, p.sl, current_price, pip_size, min_stop_distance
+            )
             if new_sl is not None:
                 self.broker.modify_stop_loss(p.ticket, new_sl)
                 p.sl = new_sl
