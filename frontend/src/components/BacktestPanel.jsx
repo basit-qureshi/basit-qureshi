@@ -1,11 +1,11 @@
 import { useState } from "react";
 import EquityChart from "./EquityChart";
 
-const SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCHF", "USDCAD"];
+const SYMBOLS = ["XAUUSD", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCHF", "USDCAD"];
 
 export default function BacktestPanel({ onRun }) {
   const [form, setForm] = useState({
-    symbol: "EURUSD",
+    symbol: "XAUUSD",
     period: "60d",
     interval: "15m",
     starting_balance: 10000,

@@ -17,6 +17,8 @@ class SettingsUpdate(BaseModel):
     breakeven_trigger_pips: float | None = None
     trailing_stop_pips: float | None = None
     poll_interval_seconds: int | None = None
+    ema_fast_period: int | None = None
+    ema_slow_period: int | None = None
 
 
 class ModeUpdate(BaseModel):

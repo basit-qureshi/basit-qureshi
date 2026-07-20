@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 
 const SYMBOLS = [
+  "XAUUSD",
+  "XAUUSDm",
   "EURUSD",
   "GBPUSD",
   "USDJPY",
@@ -40,6 +42,8 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
       breakeven_trigger_pips: Number(form.breakeven_trigger_pips),
       trailing_stop_pips: Number(form.trailing_stop_pips),
       poll_interval_seconds: Number(form.poll_interval_seconds),
+      ema_fast_period: Number(form.ema_fast_period),
+      ema_slow_period: Number(form.ema_slow_period),
     });
   }
 
@@ -50,6 +54,11 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
         Breakeven/Trailing: once a trade is this many pips in profit, its stop loss auto-moves to your entry price
         (can't turn into a loss anymore), then keeps trailing behind price by the trailing pips as it keeps moving
         your way — locking in more profit automatically. Leave at 0 to disable.
+      </p>
+      <p className="muted">
+        EMA Fast/Slow: lower numbers make the strategy react faster and trade more often (good for quick
+        open-close-profit cycles), at the cost of more false signals/noise trades. Higher numbers trade less often
+        but each signal tends to be more reliable.
       </p>
       {running && <p className="muted">Stop the bot to change settings.</p>}
       <form className="settings-form" onSubmit={handleSubmit}>
@@ -159,6 +168,26 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
             min="0"
             value={form.trailing_stop_pips}
             onChange={(e) => update("trailing_stop_pips", e.target.value)}
+          />
+        </label>
+        <label>
+          EMA Fast Period (lower = faster signals)
+          <input
+            disabled={running}
+            type="number"
+            min="2"
+            value={form.ema_fast_period}
+            onChange={(e) => update("ema_fast_period", e.target.value)}
+          />
+        </label>
+        <label>
+          EMA Slow Period (lower = faster signals)
+          <input
+            disabled={running}
+            type="number"
+            min="3"
+            value={form.ema_slow_period}
+            onChange={(e) => update("ema_slow_period", e.target.value)}
           />
         </label>
         <label>

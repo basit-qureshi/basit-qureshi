@@ -1,5 +1,7 @@
 import asyncio
+import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 from app.brokers import get_broker
 from app.brokers.base import BrokerAdapter
@@ -8,6 +10,8 @@ from app.db import SessionLocal, TradeRecord, init_db
 from app.engine.trading_engine import TradingEngine
 from app.risk.risk_manager import RiskManager
 from app.strategy.ema_rsi_strategy import EmaRsiStrategy
+
+_SETTINGS_FILE = Path(__file__).resolve().parent.parent / "runtime_settings.json"
 
 
 class BotManager:
@@ -29,14 +33,35 @@ class BotManager:
             "breakeven_trigger_pips": settings.breakeven_trigger_pips,
             "trailing_stop_pips": settings.trailing_stop_pips,
             "poll_interval_seconds": settings.poll_interval_seconds,
+            "ema_fast_period": settings.ema_fast_period,
+            "ema_slow_period": settings.ema_slow_period,
             "mode": settings.account_type,
         }
+        self._load_persisted_settings()
         self._subscribers: list[asyncio.Queue] = []
         self.engine = self._build_engine()
 
+    def _load_persisted_settings(self) -> None:
+        """Settings changed from the dashboard are saved to runtime_settings.json
+        so they survive a backend restart instead of silently reverting to
+        whatever is in .env every time."""
+        if not _SETTINGS_FILE.exists():
+            return
+        try:
+            saved = json.loads(_SETTINGS_FILE.read_text())
+            self.settings.update({k: v for k, v in saved.items() if k in self.settings})
+        except Exception:
+            pass
+
+    def _save_persisted_settings(self) -> None:
+        try:
+            _SETTINGS_FILE.write_text(json.dumps(self.settings, indent=2))
+        except Exception:
+            pass
+
     def _build_engine(self) -> TradingEngine:
         s = self.settings
-        strategy = EmaRsiStrategy()
+        strategy = EmaRsiStrategy(ema_fast=s["ema_fast_period"], ema_slow=s["ema_slow_period"])
         risk_manager = RiskManager(
             risk_percent=s["risk_percent"],
             stop_loss_pips=s["stop_loss_pips"],
@@ -75,12 +100,14 @@ class BotManager:
         if self.engine.running:
             raise RuntimeError("Stop the bot before changing settings")
         self.settings.update(new_settings)
+        self._save_persisted_settings()
         self.engine = self._build_engine()
 
     def set_mode(self, mode: str) -> None:
         if self.engine.running:
             raise RuntimeError("Stop the bot before switching mode")
         self.settings["mode"] = mode
+        self._save_persisted_settings()
         self.engine = self._build_engine()
 
     def _reconcile_stale_open_trades(self) -> None:

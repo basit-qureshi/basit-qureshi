@@ -4,6 +4,7 @@ backend/*.db
 backend/__pycache__/
 backend/**/__pycache__/
 backend/test_engine.db
+backend/runtime_settings.json
 
 frontend/node_modules/
 frontend/dist/

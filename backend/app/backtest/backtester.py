@@ -12,6 +12,7 @@ _YF_SYMBOL_MAP = {
     "AUDUSD": "AUDUSD=X",
     "USDCHF": "USDCHF=X",
     "USDCAD": "USDCAD=X",
+    "XAUUSD": "GC=F",  # Gold futures continuous contract — closest free proxy for spot gold
 }
 
 # Local pip-size table so the backtester has no dependency on a live broker connection.
@@ -22,6 +23,7 @@ _PIP_SIZES = {
     "AUDUSD": 0.0001,
     "USDCHF": 0.0001,
     "USDCAD": 0.0001,
+    "XAUUSD": 0.01,
 }
 
 
