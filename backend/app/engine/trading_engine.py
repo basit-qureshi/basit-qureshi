@@ -68,6 +68,7 @@ class TradingEngine:
             while self._running:
                 try:
                     self._tick()
+                    self._last_error = None
                 except Exception as exc:
                     self._last_error = str(exc)
                     logger.exception("trading engine tick failed")
