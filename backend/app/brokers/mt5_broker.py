@@ -108,7 +108,14 @@ class MT5Broker(BrokerAdapter):
         # forex pairs do. A few extra points of buffer avoids rejections from
         # rounding/price movement between our calculation and the order reaching MT5.
         stops_level_points = getattr(info, "trade_stops_level", 0) or 0
-        min_stop_distance = (stops_level_points + 5) * info.point if stops_level_points else 0.0
+        stops_level_distance = (stops_level_points + 5) * info.point if stops_level_points else 0.0
+        # Some brokers report trade_stops_level=0 (no declared minimum) yet still
+        # reject a stop that doesn't clear the live spread — Gold's spread alone
+        # can be wider than a "normal" pip-based stop. Use whichever is larger.
+        tick = mt5.symbol_info_tick(symbol)
+        spread = (tick.ask - tick.bid) if tick else 0.0
+        spread_based_distance = spread * 3
+        min_stop_distance = max(stops_level_distance, spread_based_distance)
         return SymbolInfo(
             symbol=symbol,
             pip_size=pip_size,
