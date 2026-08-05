@@ -17,20 +17,25 @@ const TIMEFRAMES = ["M1", "M5", "M15", "M30", "H1", "H4", "D1"];
 
 export default function SettingsPanel({ settings, running, onSave, saving }) {
   const [form, setForm] = useState(settings || {});
+  const [dirty, setDirty] = useState(false);
 
+  // The dashboard polls status every few seconds, handing us a fresh settings
+  // object each time. Only sync it into the form while the user has no unsaved
+  // edits — otherwise their typing gets wiped mid-edit on every poll.
   useEffect(() => {
-    if (settings) setForm(settings);
-  }, [settings]);
+    if (settings && !dirty) setForm(settings);
+  }, [settings, dirty]);
 
   if (!form) return null;
 
   function update(key, value) {
+    setDirty(true);
     setForm((f) => ({ ...f, [key]: value }));
   }
 
-  function handleSubmit(e) {
+  async function handleSubmit(e) {
     e.preventDefault();
-    onSave({
+    const ok = await onSave({
       symbol: form.symbol,
       timeframe: form.timeframe,
       risk_percent: Number(form.risk_percent),
@@ -45,6 +50,7 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
       ema_fast_period: Number(form.ema_fast_period),
       ema_slow_period: Number(form.ema_slow_period),
     });
+    if (ok) setDirty(false);  // keep unsaved edits on screen if the save was rejected
   }
 
   return (

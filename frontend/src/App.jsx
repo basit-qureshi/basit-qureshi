@@ -92,8 +92,10 @@ export default function App() {
     try {
       await api.updateSettings(newSettings);
       await refresh();
+      return true;
     } catch (err) {
       setGlobalError(err.message);
+      return false;
     }
   }
 
