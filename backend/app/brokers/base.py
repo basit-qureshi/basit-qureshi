@@ -84,3 +84,9 @@ class BrokerAdapter(ABC):
     def modify_stop_loss(self, ticket: str, new_sl: float) -> None:
         """Moves an open position's stop loss (used for breakeven/trailing stop)."""
         ...
+
+    @abstractmethod
+    def get_realized_profit(self, ticket: str) -> float | None:
+        """Actual realized profit of a closed position (including commission/swap
+        where the broker reports them), or None if the broker can't tell."""
+        ...

@@ -55,6 +55,7 @@ class MockBroker(BrokerAdapter):
         self._currency = currency
         self._leverage = leverage
         self._positions: dict[str, Position] = {}
+        self._closed_profits: dict[str, float] = {}
         self._prices: dict[str, float] = {}
         self._candle_cache: dict[str, pd.DataFrame] = {}
         self._last_advance_time: dict[str, float] = {}
@@ -196,9 +197,13 @@ class MockBroker(BrokerAdapter):
             return 0.0
         profit = self._unrealized_profit(pos)
         self._balance += profit
+        self._closed_profits[ticket] = round(profit, 2)
         return profit
 
     def modify_stop_loss(self, ticket: str, new_sl: float) -> None:
         pos = self._positions.get(ticket)
         if pos is not None:
             pos.sl = new_sl
+
+    def get_realized_profit(self, ticket: str) -> float | None:
+        return self._closed_profits.get(ticket)

@@ -60,10 +60,18 @@ class RiskManager:
         """Returns True if trading should be halted for the rest of the day."""
         return self.daily_loss_percent(equity) >= self.max_daily_loss_percent
 
-    def calculate_position_size(self, balance: float, symbol_info: SymbolInfo) -> float:
+    def calculate_position_size(
+        self, balance: float, symbol_info: SymbolInfo, stop_pips: float | None = None
+    ) -> float:
+        """Lots such that hitting the stop loses ~risk_percent of balance.
+        Pass stop_pips when the actual stop distance differs from the configured
+        stop_loss_pips (e.g. widened to the broker's minimum) — sizing must use
+        the distance the SL will really sit at, or the true risk multiplies.
+        """
+        effective_stop_pips = stop_pips if stop_pips and stop_pips > 0 else self.stop_loss_pips
         risk_amount = balance * (self.risk_percent / 100)
         pip_value_per_lot = symbol_info.pip_value_per_lot or 10.0
-        raw_lots = risk_amount / (self.stop_loss_pips * pip_value_per_lot)
+        raw_lots = risk_amount / (effective_stop_pips * pip_value_per_lot)
         step = symbol_info.volume_step or 0.01
         lots = max(symbol_info.min_volume, round(raw_lots / step) * step)
         return round(lots, 2)

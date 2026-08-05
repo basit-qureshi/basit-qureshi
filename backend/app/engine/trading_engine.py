@@ -42,6 +42,7 @@ class TradingEngine:
         self._task: asyncio.Task | None = None
         self._last_error: str | None = None
         self._last_known_profit: dict[str, float] = {}
+        self._last_trade_candle_time = None
 
     @property
     def running(self) -> bool:
@@ -77,12 +78,9 @@ class TradingEngine:
             pass
 
     def _tick(self) -> None:
-        balance_before = self.broker.get_account_info().balance
-        # get_open_positions() is where SL/TP closures actually happen (broker-side),
-        # so balance can change between these two get_account_info() calls.
         open_positions = self.broker.get_open_positions(self.symbol)
         account = self.broker.get_account_info()
-        self._sync_closed_positions(open_positions, account.balance - balance_before)
+        self._sync_closed_positions(open_positions)
 
         symbol_info = self.broker.get_symbol_info(self.symbol)
         current_price = self.broker.get_current_price(self.symbol)
@@ -99,14 +97,29 @@ class TradingEngine:
 
         candles = self.broker.get_candles(self.symbol, self.timeframe, 200)
         result = self.strategy.generate_signal(candles)
+        current_candle_time = candles.index[-1] if len(candles) else None
 
-        if result.signal != Signal.NONE and decision.allowed:
+        # One entry per candle: after a stop-out, the same crossover keeps
+        # "firing" on every poll until a new candle forms, which would
+        # otherwise re-enter the same losing setup within seconds.
+        already_traded_this_candle = (
+            current_candle_time is not None and current_candle_time == self._last_trade_candle_time
+        )
+
+        if result.signal != Signal.NONE and decision.allowed and not already_traded_this_candle:
             side = OrderSide.BUY if result.signal == Signal.BUY else OrderSide.SELL
             sl, tp = self.risk_manager.compute_sl_tp(
                 result.close, side.value, symbol_info.pip_size, symbol_info.min_stop_distance
             )
-            position = self.broker.place_order(self.symbol, side, decision.volume, sl, tp)
+            # Size from the ACTUAL stop distance (which the broker's minimum may
+            # have widened beyond stop_loss_pips) so the money at risk stays at
+            # risk_percent — sizing from the configured pips while the real SL
+            # sits further away would silently multiply the risk per trade.
+            actual_stop_pips = abs(result.close - sl) / symbol_info.pip_size
+            volume = self.risk_manager.calculate_position_size(account.balance, symbol_info, actual_stop_pips)
+            position = self.broker.place_order(self.symbol, side, volume, sl, tp)
             self.risk_manager.record_trade_opened()
+            self._last_trade_candle_time = current_candle_time
             self._log_new_trade(position)
             open_positions = open_positions + [position]
 
@@ -138,27 +151,31 @@ class TradingEngine:
                 record.sl = new_sl
                 session.commit()
 
-    def _sync_closed_positions(self, current_open: list[Position], realized_delta: float) -> None:
+    def _sync_closed_positions(self, current_open: list[Position]) -> None:
         """Any ticket we knew about last tick that is no longer open (SL/TP hit,
-        or closed some other way) gets marked CLOSED in the DB. The realized
-        profit is the actual account balance delta since the last tick, not an
-        estimate, so displayed stats match the broker's own numbers exactly.
-        With multiple positions closing in the same tick, the delta is split
-        evenly between them (an edge case that doesn't occur with the default
-        max_open_trades=1).
+        or closed some other way) gets marked CLOSED in the DB with the broker's
+        own recorded profit for that position (deal history on MT5), so what we
+        display matches the broker's history exactly. Falls back to the last
+        unrealized profit we observed if the broker can't report it.
         """
         current_tickets = {p.ticket for p in current_open}
         closed_tickets = set(self._last_known_profit.keys()) - current_tickets
         if not closed_tickets:
             return
-        per_ticket_profit = round(realized_delta / len(closed_tickets), 2)
         with SessionLocal() as session:
             for ticket in closed_tickets:
                 record = session.query(TradeRecord).filter_by(ticket=ticket, status="OPEN").first()
                 if record:
+                    profit = None
+                    try:
+                        profit = self.broker.get_realized_profit(ticket)
+                    except Exception:
+                        logger.exception("failed to fetch realized profit for %s", ticket)
+                    if profit is None:
+                        profit = round(self._last_known_profit.get(ticket, 0.0), 2)
                     record.status = "CLOSED"
                     record.close_time = datetime.now(timezone.utc)
-                    record.profit = per_ticket_profit
+                    record.profit = profit
                 self._last_known_profit.pop(ticket, None)
             session.commit()
 

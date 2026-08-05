@@ -234,6 +234,20 @@ class MT5Broker(BrokerAdapter):
         return pos.profit
 
     @_synchronized
+    def get_realized_profit(self, ticket: str) -> float | None:
+        """Sums the actual deals MT5 recorded for this position — the same numbers
+        the broker's own history shows — instead of estimating from balance moves."""
+        mt5 = self._mt5
+        try:
+            deals = mt5.history_deals_get(position=int(ticket))
+        except Exception:
+            return None
+        if not deals:
+            return None
+        total = sum(d.profit + d.commission + d.swap for d in deals)
+        return round(total, 2)
+
+    @_synchronized
     def modify_stop_loss(self, ticket: str, new_sl: float) -> None:
         mt5 = self._mt5
         positions = mt5.positions_get(ticket=int(ticket))

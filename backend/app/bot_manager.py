@@ -3,6 +3,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from sqlalchemy import or_
+
 from app.brokers import get_broker
 from app.brokers.base import BrokerAdapter
 from app.config import settings
@@ -130,6 +132,29 @@ class BotManager:
                 if record.ticket not in live_tickets:
                     record.status = "CLOSED"
                     record.close_time = datetime.now(timezone.utc)
+                    try:
+                        record.profit = self.broker.get_realized_profit(record.ticket)
+                    except Exception:
+                        pass
+            # Also backfill already-CLOSED trades whose profit was never recorded
+            # (None) or was recorded as 0.00 by the old balance-delta logic —
+            # re-fetching from the broker's deal history returns the true value
+            # either way (a genuinely break-even trade just gets 0 back again).
+            missing = (
+                session.query(TradeRecord)
+                .filter(
+                    TradeRecord.status == "CLOSED",
+                    or_(TradeRecord.profit.is_(None), TradeRecord.profit == 0),
+                )
+                .all()
+            )
+            for record in missing:
+                try:
+                    profit = self.broker.get_realized_profit(record.ticket)
+                except Exception:
+                    continue
+                if profit is not None:
+                    record.profit = profit
             session.commit()
 
 
