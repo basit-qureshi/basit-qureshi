@@ -21,8 +21,10 @@ class Settings(BaseSettings):
     symbol: str = "XAUUSD"  # Gold. Use your broker's exact name, e.g. Exness Standard uses "XAUUSDm".
     timeframe: str = "M1"
     risk_percent: float = 1.0
-    stop_loss_pips: float = 20
-    take_profit_pips: float = 40
+    # For Gold (2-digit quotes) one point = 0.01, so 100/200 is a $1.00 stop
+    # against a $2.00 target — the 1:2 risk:reward used by the retest strategy.
+    stop_loss_pips: float = 100
+    take_profit_pips: float = 200
     max_open_trades: int = 1
     max_daily_loss_percent: float = 5.0
     max_daily_trades: int = 0  # 0 = unlimited
@@ -31,7 +33,10 @@ class Settings(BaseSettings):
     poll_interval_seconds: int = 30
     ema_fast_period: int = 5  # lower = faster/more frequent signals, more noise
     ema_slow_period: int = 13
-    strategy: str = "scalp_breakout"  # "ema_rsi" (crossover) or "scalp_breakout" (trend+breakout+volume)
+    # "retest_rejection" = M5 breakout, M1 retest + rejection entry (scalping, 1:2 RR)
+    # "scalp_breakout"   = trend + breakout + volume, single timeframe
+    # "ema_rsi"          = classic EMA crossover with RSI filter
+    strategy: str = "retest_rejection"
 
     database_url: str = "sqlite:///./trading_bot.db"
 

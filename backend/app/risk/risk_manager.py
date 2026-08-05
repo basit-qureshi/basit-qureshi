@@ -100,8 +100,14 @@ class RiskManager:
         # Some symbols (e.g. Gold) enforce a broker-side minimum distance between
         # price and SL/TP that can be wider than a "normal" pip-based stop —
         # widen ours to at least that instead of letting the broker reject the order.
-        distance_sl = max(self.stop_loss_pips * pip_size, min_stop_distance)
-        distance_tp = max(self.take_profit_pips * pip_size, min_stop_distance)
+        # When the stop gets widened, the target is scaled by the same factor so
+        # the configured risk:reward (e.g. 1:2) survives; widening each side
+        # independently would quietly flatten it toward 1:1.
+        wanted_sl = self.stop_loss_pips * pip_size
+        wanted_tp = self.take_profit_pips * pip_size
+        reward_ratio = (wanted_tp / wanted_sl) if wanted_sl > 0 else 2.0
+        distance_sl = max(wanted_sl, min_stop_distance)
+        distance_tp = max(distance_sl * reward_ratio, min_stop_distance)
         if side == "BUY":
             return entry_price - distance_sl, entry_price + distance_tp
         return entry_price + distance_sl, entry_price - distance_tp

@@ -65,7 +65,13 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
       <p className="muted">
         EMA Fast/Slow: lower numbers make the strategy react faster and trade more often (good for quick
         open-close-profit cycles), at the cost of more false signals/noise trades. Higher numbers trade less often
-        but each signal tends to be more reliable.
+        but each signal tends to be more reliable. (Not used by the M5→M1 retest strategy, which trades levels
+        rather than EMA crosses.)
+      </p>
+      <p className="muted">
+        Stop Loss / Take Profit are in points — on Gold one point is 0.01, so 100/200 means a $1.00 stop against a
+        $2.00 target (1:2). If your broker's minimum stop distance is wider than your stop, both are widened
+        together so the ratio stays the same.
       </p>
       {running && <p className="muted">Stop the bot to change settings.</p>}
       <form className="settings-form" onSubmit={handleSubmit}>
@@ -97,7 +103,8 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
         <label>
           Strategy
           <select disabled={running} value={form.strategy} onChange={(e) => update("strategy", e.target.value)}>
-            <option value="scalp_breakout">Scalping — Breakout + Volume (fast, M1/M5)</option>
+            <option value="retest_rejection">M5 Breakout → M1 Retest Rejection (scalping, 1:2)</option>
+            <option value="scalp_breakout">Scalping — Breakout + Volume (single timeframe)</option>
             <option value="ema_rsi">EMA Crossover + RSI (steady, fewer trades)</option>
           </select>
         </label>

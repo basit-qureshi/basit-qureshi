@@ -96,7 +96,14 @@ class TradingEngine:
         )
 
         candles = self.broker.get_candles(self.symbol, self.timeframe, 200)
-        result = self.strategy.generate_signal(candles)
+        # Strategies that confirm on a higher timeframe (e.g. breakout on M5,
+        # entry on M1) declare it and get those candles passed in as well.
+        higher_timeframe = getattr(self.strategy, "higher_timeframe", None)
+        if higher_timeframe:
+            higher_candles = self.broker.get_candles(self.symbol, higher_timeframe, 200)
+            result = self.strategy.generate_signal(candles, higher_candles)
+        else:
+            result = self.strategy.generate_signal(candles)
         current_candle_time = candles.index[-1] if len(candles) else None
 
         # One entry per candle: after a stop-out, the same crossover keeps

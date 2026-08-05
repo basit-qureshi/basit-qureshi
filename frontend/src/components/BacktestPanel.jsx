@@ -7,12 +7,12 @@ export default function BacktestPanel({ onRun }) {
   const [form, setForm] = useState({
     symbol: "XAUUSD",
     period: "60d",
-    interval: "15m",
+    interval: "5m",
     starting_balance: 10000,
     risk_percent: 1,
-    stop_loss_pips: 20,
-    take_profit_pips: 40,
-    strategy: "scalp_breakout",
+    stop_loss_pips: 100,
+    take_profit_pips: 200,
+    strategy: "retest_rejection",
   });
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
@@ -59,6 +59,7 @@ export default function BacktestPanel({ onRun }) {
         <label>
           Strategy
           <select value={form.strategy} onChange={(e) => update("strategy", e.target.value)}>
+            <option value="retest_rejection">M5 Breakout → M1 Retest Rejection</option>
             <option value="scalp_breakout">Scalping — Breakout + Volume</option>
             <option value="ema_rsi">EMA Crossover + RSI</option>
           </select>
@@ -75,6 +76,8 @@ export default function BacktestPanel({ onRun }) {
         <label>
           Interval
           <select value={form.interval} onChange={(e) => update("interval", e.target.value)}>
+            <option value="1m">1 min (7 days max)</option>
+            <option value="5m">5 min</option>
             <option value="15m">15 min</option>
             <option value="1h">1 hour</option>
             <option value="1d">1 day</option>

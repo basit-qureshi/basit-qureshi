@@ -12,6 +12,7 @@ from app.db import SessionLocal, TradeRecord, init_db
 from app.engine.trading_engine import TradingEngine
 from app.risk.risk_manager import RiskManager
 from app.strategy.ema_rsi_strategy import EmaRsiStrategy
+from app.strategy.retest_rejection import RetestRejectionStrategy
 from app.strategy.scalp_breakout import ScalpBreakoutStrategy
 
 _SETTINGS_FILE = Path(__file__).resolve().parent.parent / "runtime_settings.json"
@@ -65,7 +66,9 @@ class BotManager:
 
     def _build_engine(self) -> TradingEngine:
         s = self.settings
-        if s["strategy"] == "scalp_breakout":
+        if s["strategy"] == "retest_rejection":
+            strategy = RetestRejectionStrategy()
+        elif s["strategy"] == "scalp_breakout":
             strategy = ScalpBreakoutStrategy(ema_fast=s["ema_fast_period"], ema_slow=s["ema_slow_period"])
         else:
             strategy = EmaRsiStrategy(ema_fast=s["ema_fast_period"], ema_slow=s["ema_slow_period"])

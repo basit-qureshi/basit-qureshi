@@ -58,7 +58,10 @@ def run_backtest(
     trades: list[dict] = []
     open_trade: dict | None = None
 
-    min_len = max(strategy.ema_slow_period, strategy.rsi_period) + 2
+    # Multi-timeframe strategies build their higher timeframe by resampling, so
+    # they need enough bars to fill that lookback too.
+    higher_tf_bars = 5 * 25 if getattr(strategy, "higher_timeframe", None) else 0
+    min_len = max(strategy.ema_slow_period, strategy.rsi_period, higher_tf_bars) + 2
 
     for i in range(min_len, len(df)):
         window = df.iloc[: i + 1]
