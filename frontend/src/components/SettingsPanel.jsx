@@ -49,6 +49,7 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
       poll_interval_seconds: Number(form.poll_interval_seconds),
       ema_fast_period: Number(form.ema_fast_period),
       ema_slow_period: Number(form.ema_slow_period),
+      strategy: form.strategy,
     });
     if (ok) setDirty(false);  // keep unsaved edits on screen if the save was rejected
   }
@@ -91,6 +92,13 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
                 {t}
               </option>
             ))}
+          </select>
+        </label>
+        <label>
+          Strategy
+          <select disabled={running} value={form.strategy} onChange={(e) => update("strategy", e.target.value)}>
+            <option value="scalp_breakout">Scalping — Breakout + Volume (fast, M1/M5)</option>
+            <option value="ema_rsi">EMA Crossover + RSI (steady, fewer trades)</option>
           </select>
         </label>
         <label>

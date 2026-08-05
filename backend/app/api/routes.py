@@ -11,6 +11,7 @@ from app.db import SessionLocal, TradeRecord
 from app.risk.risk_manager import RiskManager
 from app.strategy.ema_rsi_strategy import EmaRsiStrategy
 from app.strategy.indicators import ema
+from app.strategy.scalp_breakout import ScalpBreakoutStrategy
 
 router = APIRouter(prefix="/api")
 
@@ -223,7 +224,7 @@ def test_order(body: TestOrderRequest):
 
 @router.post("/backtest")
 def backtest(body: BacktestRequest):
-    strategy = EmaRsiStrategy()
+    strategy = ScalpBreakoutStrategy() if body.strategy == "scalp_breakout" else EmaRsiStrategy()
     risk_manager = RiskManager(
         risk_percent=body.risk_percent,
         stop_loss_pips=body.stop_loss_pips,

@@ -12,6 +12,7 @@ from app.db import SessionLocal, TradeRecord, init_db
 from app.engine.trading_engine import TradingEngine
 from app.risk.risk_manager import RiskManager
 from app.strategy.ema_rsi_strategy import EmaRsiStrategy
+from app.strategy.scalp_breakout import ScalpBreakoutStrategy
 
 _SETTINGS_FILE = Path(__file__).resolve().parent.parent / "runtime_settings.json"
 
@@ -37,6 +38,7 @@ class BotManager:
             "poll_interval_seconds": settings.poll_interval_seconds,
             "ema_fast_period": settings.ema_fast_period,
             "ema_slow_period": settings.ema_slow_period,
+            "strategy": settings.strategy,
             "mode": settings.account_type,
         }
         self._load_persisted_settings()
@@ -63,7 +65,10 @@ class BotManager:
 
     def _build_engine(self) -> TradingEngine:
         s = self.settings
-        strategy = EmaRsiStrategy(ema_fast=s["ema_fast_period"], ema_slow=s["ema_slow_period"])
+        if s["strategy"] == "scalp_breakout":
+            strategy = ScalpBreakoutStrategy(ema_fast=s["ema_fast_period"], ema_slow=s["ema_slow_period"])
+        else:
+            strategy = EmaRsiStrategy(ema_fast=s["ema_fast_period"], ema_slow=s["ema_slow_period"])
         risk_manager = RiskManager(
             risk_percent=s["risk_percent"],
             stop_loss_pips=s["stop_loss_pips"],

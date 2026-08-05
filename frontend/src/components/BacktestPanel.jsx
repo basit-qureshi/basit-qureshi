@@ -12,6 +12,7 @@ export default function BacktestPanel({ onRun }) {
     risk_percent: 1,
     stop_loss_pips: 20,
     take_profit_pips: 40,
+    strategy: "scalp_breakout",
   });
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
@@ -53,6 +54,13 @@ export default function BacktestPanel({ onRun }) {
                 {s}
               </option>
             ))}
+          </select>
+        </label>
+        <label>
+          Strategy
+          <select value={form.strategy} onChange={(e) => update("strategy", e.target.value)}>
+            <option value="scalp_breakout">Scalping — Breakout + Volume</option>
+            <option value="ema_rsi">EMA Crossover + RSI</option>
           </select>
         </label>
         <label>

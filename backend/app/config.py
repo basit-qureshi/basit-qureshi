@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     poll_interval_seconds: int = 30
     ema_fast_period: int = 5  # lower = faster/more frequent signals, more noise
     ema_slow_period: int = 13
+    strategy: str = "scalp_breakout"  # "ema_rsi" (crossover) or "scalp_breakout" (trend+breakout+volume)
 
     database_url: str = "sqlite:///./trading_bot.db"
 

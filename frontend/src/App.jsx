@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { api, connectWebSocket } from "./api";
 import StatusBar from "./components/StatusBar";
 import StatCards from "./components/StatCards";
@@ -8,6 +8,7 @@ import TradesTable from "./components/TradesTable";
 import SettingsPanel from "./components/SettingsPanel";
 import BacktestPanel from "./components/BacktestPanel";
 import ManualTestPanel from "./components/ManualTestPanel";
+import Toasts from "./components/Toasts";
 import "./App.css";
 
 export default function App() {
@@ -20,6 +21,49 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [globalError, setGlobalError] = useState(null);
   const [tab, setTab] = useState("dashboard");
+  const [toasts, setToasts] = useState([]);
+  const prevTradesRef = useRef(null);
+
+  const pushToast = useCallback((kind, title, body) => {
+    const id = `${Date.now()}-${Math.random()}`;
+    setToasts((t) => [...t, { id, kind, title, body }]);
+    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 8000);
+  }, []);
+
+  const dismissToast = useCallback((id) => {
+    setToasts((t) => t.filter((x) => x.id !== id));
+  }, []);
+
+  // Compare each trades poll against the previous one to announce what changed.
+  // Skipped on the very first load so a page refresh doesn't replay history.
+  const announceTradeChanges = useCallback(
+    (newTrades) => {
+      const prev = prevTradesRef.current;
+      prevTradesRef.current = newTrades;
+      if (prev === null) return;
+      const prevById = new Map(prev.map((t) => [t.id, t]));
+      for (const t of newTrades) {
+        const old = prevById.get(t.id);
+        if (!old && t.status === "OPEN") {
+          pushToast(
+            t.side === "BUY" ? "buy" : "sell",
+            `${t.side} trade opened`,
+            `${t.symbol} ${t.volume} lots @ ${t.open_price?.toFixed(2)}`
+          );
+        } else if (old && old.status === "OPEN" && t.status === "CLOSED") {
+          const p = t.profit;
+          if (p == null) {
+            pushToast("info", "Trade closed", `${t.symbol} ${t.side} ${t.volume} lots`);
+          } else if (p >= 0) {
+            pushToast("profit", `Profit +$${p.toFixed(2)} ✓`, `${t.symbol} ${t.side} ${t.volume} lots closed`);
+          } else {
+            pushToast("loss", `Loss -$${Math.abs(p).toFixed(2)}`, `${t.symbol} ${t.side} ${t.volume} lots closed`);
+          }
+        }
+      }
+    },
+    [pushToast]
+  );
 
   const refresh = useCallback(async () => {
     try {
@@ -27,12 +71,13 @@ export default function App() {
       setStatus(s);
       setStats(st);
       setTrades(tr);
+      announceTradeChanges(tr);
       if (s.account) setLiveAccount(s.account);
       setGlobalError(null);
     } catch (err) {
       setGlobalError(err.message);
     }
-  }, []);
+  }, [announceTradeChanges]);
 
   useEffect(() => {
     refresh();
@@ -60,6 +105,7 @@ export default function App() {
     try {
       await api.start(confirmReal);
       await refresh();
+      pushToast("info", "Bot started", "Watching the market — trades will open automatically on signals");
     } catch (err) {
       setGlobalError(err.message);
     } finally {
@@ -72,6 +118,7 @@ export default function App() {
     try {
       await api.stop();
       await refresh();
+      pushToast("info", "Bot stopped", "No new trades will be opened");
     } catch (err) {
       setGlobalError(err.message);
     } finally {
@@ -101,6 +148,7 @@ export default function App() {
 
   return (
     <div className="app">
+      <Toasts toasts={toasts} onDismiss={dismissToast} />
       <header className="app-header">
         <h1>Forex AI Trading Bot</h1>
         <nav className="tabs">

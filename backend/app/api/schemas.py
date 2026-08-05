@@ -19,6 +19,7 @@ class SettingsUpdate(BaseModel):
     poll_interval_seconds: int | None = None
     ema_fast_period: int | None = None
     ema_slow_period: int | None = None
+    strategy: str | None = None
 
 
 class ModeUpdate(BaseModel):
@@ -40,3 +41,4 @@ class BacktestRequest(BaseModel):
     risk_percent: float = 1.0
     stop_loss_pips: float = 20
     take_profit_pips: float = 40
+    strategy: str = "ema_rsi"
