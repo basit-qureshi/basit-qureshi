@@ -11,6 +11,7 @@ from app.db import SessionLocal, TradeRecord
 from app.risk.risk_manager import RiskManager
 from app.strategy.ema_rsi_strategy import EmaRsiStrategy
 from app.strategy.indicators import ema
+from app.strategy.momentum_scalp import MomentumScalpStrategy
 from app.strategy.retest_rejection import RetestRejectionStrategy
 from app.strategy.scalp_breakout import ScalpBreakoutStrategy
 
@@ -225,7 +226,9 @@ def test_order(body: TestOrderRequest):
 
 @router.post("/backtest")
 def backtest(body: BacktestRequest):
-    if body.strategy == "retest_rejection":
+    if body.strategy == "momentum_scalp":
+        strategy = MomentumScalpStrategy.from_sensitivity(body.sensitivity)
+    elif body.strategy == "retest_rejection":
         strategy = RetestRejectionStrategy.from_sensitivity(body.sensitivity)
     elif body.strategy == "scalp_breakout":
         strategy = ScalpBreakoutStrategy()

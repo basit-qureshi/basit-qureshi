@@ -111,9 +111,10 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
         <label>
           Strategy
           <select disabled={running} value={form.strategy} onChange={(e) => update("strategy", e.target.value)}>
-            <option value="retest_rejection">M5 Breakout → M1 Retest Rejection (scalping, 1:2)</option>
+            <option value="momentum_scalp">Momentum Scalp — fastest, many trades/hour</option>
+            <option value="retest_rejection">M5 Breakout → M1 Retest Rejection (few, selective)</option>
             <option value="scalp_breakout">Scalping — Breakout + Volume (single timeframe)</option>
-            <option value="ema_rsi">EMA Crossover + RSI (steady, fewer trades)</option>
+            <option value="ema_rsi">EMA Crossover + RSI (steady, fewest trades)</option>
           </select>
         </label>
         <label>

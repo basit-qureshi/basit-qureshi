@@ -25,7 +25,9 @@ class Settings(BaseSettings):
     # against a $2.00 target — the 1:2 risk:reward used by the retest strategy.
     stop_loss_pips: float = 100
     take_profit_pips: float = 200
-    max_open_trades: int = 1
+    # Several scalps can run at once. Note each one risks risk_percent of the
+    # balance, so total exposure is roughly max_open_trades x risk_percent.
+    max_open_trades: int = 3
     max_daily_loss_percent: float = 5.0
     max_daily_trades: int = 0  # 0 = unlimited
     breakeven_trigger_pips: float = 0  # 0 = disabled
@@ -38,10 +40,11 @@ class Settings(BaseSettings):
     max_trade_minutes: int = 15
     ema_fast_period: int = 5  # lower = faster/more frequent signals, more noise
     ema_slow_period: int = 13
-    # "retest_rejection" = M5 breakout, M1 retest + rejection entry (scalping, 1:2 RR)
+    # "momentum_scalp"   = trend + strong push candle (fires many times an hour)
+    # "retest_rejection" = M5 breakout, M1 retest + rejection entry (few, selective)
     # "scalp_breakout"   = trend + breakout + volume, single timeframe
     # "ema_rsi"          = classic EMA crossover with RSI filter
-    strategy: str = "retest_rejection"
+    strategy: str = "momentum_scalp"
     # How permissive the entry filters are: "aggressive" trades far more often
     # (each signal is weaker), "conservative" waits for cleaner setups.
     sensitivity: str = "balanced"

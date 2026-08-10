@@ -12,7 +12,7 @@ export default function BacktestPanel({ onRun }) {
     risk_percent: 1,
     stop_loss_pips: 100,
     take_profit_pips: 200,
-    strategy: "retest_rejection",
+    strategy: "momentum_scalp",
     sensitivity: "balanced",
   });
   const [result, setResult] = useState(null);
@@ -60,6 +60,7 @@ export default function BacktestPanel({ onRun }) {
         <label>
           Strategy
           <select value={form.strategy} onChange={(e) => update("strategy", e.target.value)}>
+            <option value="momentum_scalp">Momentum Scalp (fastest)</option>
             <option value="retest_rejection">M5 Breakout → M1 Retest Rejection</option>
             <option value="scalp_breakout">Scalping — Breakout + Volume</option>
             <option value="ema_rsi">EMA Crossover + RSI</option>
