@@ -28,13 +28,27 @@ class RetestRejectionStrategy:
 
     higher_timeframe = "M5"
 
+    # How strict each entry filter is. Looser settings fire far more often but
+    # each signal is weaker — a shallower wick or a looser retest is more often
+    # just noise rather than a level actually being defended.
+    SENSITIVITY_PRESETS = {
+        "aggressive": dict(range_lookback=8, breakout_window=8, wick_ratio=0.15, volume_factor=0.7, tolerance_factor=1.2),
+        "balanced": dict(range_lookback=10, breakout_window=7, wick_ratio=0.25, volume_factor=0.9, tolerance_factor=0.9),
+        "conservative": dict(range_lookback=14, breakout_window=5, wick_ratio=0.4, volume_factor=1.2, tolerance_factor=0.5),
+    }
+
+    @classmethod
+    def from_sensitivity(cls, sensitivity: str) -> "RetestRejectionStrategy":
+        preset = cls.SENSITIVITY_PRESETS.get(sensitivity, cls.SENSITIVITY_PRESETS["balanced"])
+        return cls(**preset)
+
     def __init__(
         self,
-        range_lookback: int = 12,
-        breakout_window: int = 6,
-        wick_ratio: float = 0.3,
-        volume_factor: float = 1.0,
-        tolerance_factor: float = 0.6,
+        range_lookback: int = 10,
+        breakout_window: int = 7,
+        wick_ratio: float = 0.25,
+        volume_factor: float = 0.9,
+        tolerance_factor: float = 0.9,
     ):
         self.range_lookback = range_lookback
         self.breakout_window = breakout_window

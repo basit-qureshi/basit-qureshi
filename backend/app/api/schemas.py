@@ -20,6 +20,8 @@ class SettingsUpdate(BaseModel):
     ema_fast_period: int | None = None
     ema_slow_period: int | None = None
     strategy: str | None = None
+    sensitivity: str | None = None
+    max_trade_minutes: int | None = None
 
 
 class ModeUpdate(BaseModel):
@@ -39,6 +41,7 @@ class BacktestRequest(BaseModel):
     interval: str = "15m"
     starting_balance: float = 10000.0
     risk_percent: float = 1.0
-    stop_loss_pips: float = 20
-    take_profit_pips: float = 40
-    strategy: str = "ema_rsi"
+    stop_loss_pips: float = 100
+    take_profit_pips: float = 200
+    strategy: str = "retest_rejection"
+    sensitivity: str = "balanced"

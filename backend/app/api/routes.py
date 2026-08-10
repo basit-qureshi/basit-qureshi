@@ -226,7 +226,7 @@ def test_order(body: TestOrderRequest):
 @router.post("/backtest")
 def backtest(body: BacktestRequest):
     if body.strategy == "retest_rejection":
-        strategy = RetestRejectionStrategy()
+        strategy = RetestRejectionStrategy.from_sensitivity(body.sensitivity)
     elif body.strategy == "scalp_breakout":
         strategy = ScalpBreakoutStrategy()
     else:

@@ -13,6 +13,7 @@ export default function BacktestPanel({ onRun }) {
     stop_loss_pips: 100,
     take_profit_pips: 200,
     strategy: "retest_rejection",
+    sensitivity: "balanced",
   });
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
@@ -62,6 +63,14 @@ export default function BacktestPanel({ onRun }) {
             <option value="retest_rejection">M5 Breakout → M1 Retest Rejection</option>
             <option value="scalp_breakout">Scalping — Breakout + Volume</option>
             <option value="ema_rsi">EMA Crossover + RSI</option>
+          </select>
+        </label>
+        <label>
+          Sensitivity
+          <select value={form.sensitivity} onChange={(e) => update("sensitivity", e.target.value)}>
+            <option value="aggressive">Aggressive</option>
+            <option value="balanced">Balanced</option>
+            <option value="conservative">Conservative</option>
           </select>
         </label>
         <label>

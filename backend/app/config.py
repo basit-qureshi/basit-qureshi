@@ -30,13 +30,21 @@ class Settings(BaseSettings):
     max_daily_trades: int = 0  # 0 = unlimited
     breakeven_trigger_pips: float = 0  # 0 = disabled
     trailing_stop_pips: float = 0  # 0 = breakeven only, no further trailing
-    poll_interval_seconds: int = 30
+    # On M1 scalping a 30s poll only looks at the market twice per candle, so a
+    # setup that appears and resolves inside one candle gets missed entirely.
+    poll_interval_seconds: int = 5
+    # Close a trade that has been open this long without hitting SL or TP, so
+    # capital isn't parked in a setup that has stopped working. 0 = disabled.
+    max_trade_minutes: int = 15
     ema_fast_period: int = 5  # lower = faster/more frequent signals, more noise
     ema_slow_period: int = 13
     # "retest_rejection" = M5 breakout, M1 retest + rejection entry (scalping, 1:2 RR)
     # "scalp_breakout"   = trend + breakout + volume, single timeframe
     # "ema_rsi"          = classic EMA crossover with RSI filter
     strategy: str = "retest_rejection"
+    # How permissive the entry filters are: "aggressive" trades far more often
+    # (each signal is weaker), "conservative" waits for cleaner setups.
+    sensitivity: str = "balanced"
 
     database_url: str = "sqlite:///./trading_bot.db"
 

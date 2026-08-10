@@ -28,6 +28,7 @@ class TradingEngine:
         poll_interval_seconds: int,
         mode: str,
         on_update: Optional[Callable[[dict], None]] = None,
+        max_trade_minutes: int = 0,
     ):
         self.broker = broker
         self.strategy = strategy
@@ -37,6 +38,7 @@ class TradingEngine:
         self.poll_interval_seconds = poll_interval_seconds
         self.mode = mode
         self.on_update = on_update
+        self.max_trade_minutes = max_trade_minutes
 
         self._running = False
         self._task: asyncio.Task | None = None
@@ -84,6 +86,7 @@ class TradingEngine:
 
         symbol_info = self.broker.get_symbol_info(self.symbol)
         current_price = self.broker.get_current_price(self.symbol)
+        open_positions = self._close_stale_positions(open_positions)
         open_positions = self._apply_trailing_stop(
             open_positions, current_price, symbol_info.pip_size, symbol_info.min_stop_distance
         )
@@ -134,6 +137,36 @@ class TradingEngine:
             self._last_known_profit[p.ticket] = p.profit
 
         self._broadcast(account, open_positions, result, decision)
+
+    def _close_stale_positions(self, open_positions: list[Position]) -> list[Position]:
+        """Closes trades that have been open past max_trade_minutes without
+        reaching SL or TP. A scalping setup that hasn't resolved in that window
+        has usually stopped being the setup that was entered, and the capital is
+        better freed for the next one than left to drift into the stop."""
+        if not self.max_trade_minutes:
+            return open_positions
+
+        now = datetime.now(timezone.utc)
+        still_open = []
+        for p in open_positions:
+            try:
+                opened = datetime.fromisoformat(p.open_time)
+                if opened.tzinfo is None:
+                    opened = opened.replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                still_open.append(p)
+                continue
+            age_minutes = (now - opened).total_seconds() / 60
+            if age_minutes >= self.max_trade_minutes:
+                try:
+                    self.broker.close_position(p.ticket)
+                    logger.info("closed %s after %.1f minutes (time limit)", p.ticket, age_minutes)
+                except Exception:
+                    logger.exception("failed to time-close %s", p.ticket)
+                    still_open.append(p)
+            else:
+                still_open.append(p)
+        return still_open
 
     def _apply_trailing_stop(
         self, open_positions: list[Position], current_price: float, pip_size: float, min_stop_distance: float

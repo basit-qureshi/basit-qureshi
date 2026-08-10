@@ -40,6 +40,8 @@ class BotManager:
             "ema_fast_period": settings.ema_fast_period,
             "ema_slow_period": settings.ema_slow_period,
             "strategy": settings.strategy,
+            "sensitivity": settings.sensitivity,
+            "max_trade_minutes": settings.max_trade_minutes,
             "mode": settings.account_type,
         }
         self._load_persisted_settings()
@@ -67,7 +69,7 @@ class BotManager:
     def _build_engine(self) -> TradingEngine:
         s = self.settings
         if s["strategy"] == "retest_rejection":
-            strategy = RetestRejectionStrategy()
+            strategy = RetestRejectionStrategy.from_sensitivity(s["sensitivity"])
         elif s["strategy"] == "scalp_breakout":
             strategy = ScalpBreakoutStrategy(ema_fast=s["ema_fast_period"], ema_slow=s["ema_slow_period"])
         else:
@@ -91,6 +93,7 @@ class BotManager:
             poll_interval_seconds=s["poll_interval_seconds"],
             mode=s["mode"],
             on_update=self._on_update,
+            max_trade_minutes=s["max_trade_minutes"],
         )
 
     def _on_update(self, payload: dict) -> None:

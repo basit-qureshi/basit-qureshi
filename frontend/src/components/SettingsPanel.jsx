@@ -50,6 +50,8 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
       ema_fast_period: Number(form.ema_fast_period),
       ema_slow_period: Number(form.ema_slow_period),
       strategy: form.strategy,
+      sensitivity: form.sensitivity,
+      max_trade_minutes: Number(form.max_trade_minutes),
     });
     if (ok) setDirty(false);  // keep unsaved edits on screen if the save was rejected
   }
@@ -67,6 +69,12 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
         open-close-profit cycles), at the cost of more false signals/noise trades. Higher numbers trade less often
         but each signal tends to be more reliable. (Not used by the M5→M1 retest strategy, which trades levels
         rather than EMA crosses.)
+      </p>
+      <p className="muted">
+        Speed: <b>Poll Interval</b> is how often the market is checked — on M1 keep it at 5s or the bot only looks
+        twice per candle and misses setups. <b>Sensitivity</b> loosens or tightens the entry filters. <b>Auto-close
+        after</b> exits a trade that has been sitting open that long without hitting SL or TP, so money isn't parked
+        in a setup that stopped working.
       </p>
       <p className="muted">
         Stop Loss / Take Profit are in points — on Gold one point is 0.01, so 100/200 means a $1.00 stop against a
@@ -107,6 +115,24 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
             <option value="scalp_breakout">Scalping — Breakout + Volume (single timeframe)</option>
             <option value="ema_rsi">EMA Crossover + RSI (steady, fewer trades)</option>
           </select>
+        </label>
+        <label>
+          Sensitivity (how often it trades)
+          <select disabled={running} value={form.sensitivity} onChange={(e) => update("sensitivity", e.target.value)}>
+            <option value="aggressive">Aggressive — many trades, weaker signals</option>
+            <option value="balanced">Balanced</option>
+            <option value="conservative">Conservative — few trades, cleaner setups</option>
+          </select>
+        </label>
+        <label>
+          Auto-close after (minutes, 0 = off)
+          <input
+            disabled={running}
+            type="number"
+            min="0"
+            value={form.max_trade_minutes}
+            onChange={(e) => update("max_trade_minutes", e.target.value)}
+          />
         </label>
         <label>
           Risk per trade (% of balance)
