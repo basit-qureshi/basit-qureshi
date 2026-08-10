@@ -22,6 +22,7 @@ class SettingsUpdate(BaseModel):
     strategy: str | None = None
     sensitivity: str | None = None
     max_trade_minutes: int | None = None
+    quick_profit_usd: float | None = None
 
 
 class ModeUpdate(BaseModel):

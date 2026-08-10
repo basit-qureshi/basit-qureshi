@@ -52,6 +52,7 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
       strategy: form.strategy,
       sensitivity: form.sensitivity,
       max_trade_minutes: Number(form.max_trade_minutes),
+      quick_profit_usd: Number(form.quick_profit_usd),
     });
     if (ok) setDirty(false);  // keep unsaved edits on screen if the save was rejected
   }
@@ -75,6 +76,12 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
         twice per candle and misses setups. <b>Sensitivity</b> loosens or tightens the entry filters. <b>Auto-close
         after</b> exits a trade that has been sitting open that long without hitting SL or TP, so money isn't parked
         in a setup that stopped working.
+      </p>
+      <p className="muted">
+        <b>Book profit at $</b> closes a trade the moment it's up that much, instead of waiting for Take Profit.
+        It books wins sooner, but it caps the winning side while the stop stays where it is — booking $2 against a
+        $3 stop is a 1:0.67 ratio, so you'd then need to win about 60% of trades just to break even. Breakeven +
+        Trailing above does the "lock in profit" job without shrinking the reward.
       </p>
       <p className="muted">
         Stop Loss / Take Profit are in points — on Gold one point is 0.01, so 100/200 means a $1.00 stop against a
@@ -124,6 +131,17 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
             <option value="balanced">Balanced</option>
             <option value="conservative">Conservative — few trades, cleaner setups</option>
           </select>
+        </label>
+        <label>
+          Book profit at $ (0 = wait for TP)
+          <input
+            disabled={running}
+            type="number"
+            step="0.5"
+            min="0"
+            value={form.quick_profit_usd}
+            onChange={(e) => update("quick_profit_usd", e.target.value)}
+          />
         </label>
         <label>
           Auto-close after (minutes, 0 = off)

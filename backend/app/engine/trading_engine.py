@@ -29,6 +29,7 @@ class TradingEngine:
         mode: str,
         on_update: Optional[Callable[[dict], None]] = None,
         max_trade_minutes: int = 0,
+        quick_profit_usd: float = 0,
     ):
         self.broker = broker
         self.strategy = strategy
@@ -39,6 +40,7 @@ class TradingEngine:
         self.mode = mode
         self.on_update = on_update
         self.max_trade_minutes = max_trade_minutes
+        self.quick_profit_usd = quick_profit_usd
 
         self._running = False
         self._task: asyncio.Task | None = None
@@ -86,6 +88,7 @@ class TradingEngine:
 
         symbol_info = self.broker.get_symbol_info(self.symbol)
         current_price = self.broker.get_current_price(self.symbol)
+        open_positions = self._take_quick_profits(open_positions)
         open_positions = self._close_stale_positions(open_positions)
         open_positions = self._apply_trailing_stop(
             open_positions, current_price, symbol_info.pip_size, symbol_info.min_stop_distance
@@ -137,6 +140,28 @@ class TradingEngine:
             self._last_known_profit[p.ticket] = p.profit
 
         self._broadcast(account, open_positions, result, decision)
+
+    def _take_quick_profits(self, open_positions: list[Position]) -> list[Position]:
+        """Books a trade as soon as its floating profit reaches quick_profit_usd,
+        rather than waiting for take profit. Useful when the aim is a fast churn
+        of small wins — but note it caps the winning side while the stop stays
+        where it is, so the effective risk:reward is worse than the configured
+        SL/TP ratio suggests."""
+        if not self.quick_profit_usd or self.quick_profit_usd <= 0:
+            return open_positions
+
+        still_open = []
+        for p in open_positions:
+            if p.profit is not None and p.profit >= self.quick_profit_usd:
+                try:
+                    self.broker.close_position(p.ticket)
+                    logger.info("closed %s at +%.2f (quick profit target)", p.ticket, p.profit)
+                except Exception:
+                    logger.exception("failed to take quick profit on %s", p.ticket)
+                    still_open.append(p)
+            else:
+                still_open.append(p)
+        return still_open
 
     def _close_stale_positions(self, open_positions: list[Position]) -> list[Position]:
         """Closes trades that have been open past max_trade_minutes without

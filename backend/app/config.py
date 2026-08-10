@@ -30,8 +30,16 @@ class Settings(BaseSettings):
     max_open_trades: int = 3
     max_daily_loss_percent: float = 5.0
     max_daily_trades: int = 0  # 0 = unlimited
-    breakeven_trigger_pips: float = 0  # 0 = disabled
-    trailing_stop_pips: float = 0  # 0 = breakeven only, no further trailing
+    # Once a trade is this far in profit the stop moves to entry, so it can no
+    # longer turn into a loss, then trails behind price by trailing_stop_pips.
+    # On Gold the spread alone is ~24 points, so the trigger has to clear that.
+    breakeven_trigger_pips: float = 60  # 0 = disabled
+    trailing_stop_pips: float = 30  # 0 = breakeven only, no further trailing
+    # Close a trade the moment its floating profit reaches this many account
+    # currency units, regardless of where TP sits. 0 = let TP do its job.
+    # Taking profit earlier than TP shrinks the reward side of the risk:reward
+    # ratio — a $2 exit against a $3 stop is 1:0.67, not 1:2.
+    quick_profit_usd: float = 0
     # On M1 scalping a 30s poll only looks at the market twice per candle, so a
     # setup that appears and resolves inside one candle gets missed entirely.
     poll_interval_seconds: int = 5

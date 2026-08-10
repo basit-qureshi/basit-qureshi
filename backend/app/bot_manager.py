@@ -43,6 +43,7 @@ class BotManager:
             "strategy": settings.strategy,
             "sensitivity": settings.sensitivity,
             "max_trade_minutes": settings.max_trade_minutes,
+            "quick_profit_usd": settings.quick_profit_usd,
             "mode": settings.account_type,
         }
         self._load_persisted_settings()
@@ -97,6 +98,7 @@ class BotManager:
             mode=s["mode"],
             on_update=self._on_update,
             max_trade_minutes=s["max_trade_minutes"],
+            quick_profit_usd=s["quick_profit_usd"],
         )
 
     def _on_update(self, payload: dict) -> None:
