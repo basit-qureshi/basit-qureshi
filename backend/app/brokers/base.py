@@ -87,6 +87,13 @@ class BrokerAdapter(ABC):
         ...
 
     @abstractmethod
+    def modify_sl_tp(self, ticket: str, new_sl: float, new_tp: float) -> None:
+        """Sets both stop loss and take profit — used to re-anchor them to the
+        price the order actually filled at, rather than the price it was
+        calculated from."""
+        ...
+
+    @abstractmethod
     def get_realized_profit(self, ticket: str) -> float | None:
         """Actual realized profit of a closed position (including commission/swap
         where the broker reports them), or None if the broker can't tell."""

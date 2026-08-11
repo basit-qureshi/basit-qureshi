@@ -31,10 +31,19 @@ class Settings(BaseSettings):
     max_daily_loss_percent: float = 5.0
     max_daily_trades: int = 0  # 0 = unlimited
     # Once a trade is this far in profit the stop moves to entry, so it can no
-    # longer turn into a loss, then trails behind price by trailing_stop_pips.
-    # On Gold the spread alone is ~24 points, so the trigger has to clear that.
-    breakeven_trigger_pips: float = 60  # 0 = disabled
-    trailing_stop_pips: float = 30  # 0 = breakeven only, no further trailing
+    # longer turn into a loss. Set at 1R (= stop_loss_pips) so the move happens
+    # only after the trade has proven itself.
+    #
+    # trailing_stop_pips deliberately defaults to 0 (breakeven only, no trail).
+    # Measured over 3000 simulated M1 gold candles, a tight trail looked good on
+    # win rate but was much worse on money, because it kept closing winners long
+    # before the 200-point target:
+    #     breakeven/trail   win%   avg win   net points
+    #     60 / 30           75.5%      108      +27,600
+    #     60 / 60           75.5%      150      +42,856
+    #     100 / 0           70.7%      200      +49,300  <- best
+    breakeven_trigger_pips: float = 100  # 0 = disabled
+    trailing_stop_pips: float = 0  # 0 = breakeven only, no further trailing
     # Close a trade the moment its floating profit reaches this many account
     # currency units, regardless of where TP sits. 0 = let TP do its job.
     # Taking profit earlier than TP shrinks the reward side of the risk:reward

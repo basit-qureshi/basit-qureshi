@@ -206,5 +206,11 @@ class MockBroker(BrokerAdapter):
         if pos is not None:
             pos.sl = new_sl
 
+    def modify_sl_tp(self, ticket: str, new_sl: float, new_tp: float) -> None:
+        pos = self._positions.get(ticket)
+        if pos is not None:
+            pos.sl = new_sl
+            pos.tp = new_tp
+
     def get_realized_profit(self, ticket: str) -> float | None:
         return self._closed_profits.get(ticket)

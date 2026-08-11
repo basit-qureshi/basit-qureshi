@@ -250,6 +250,15 @@ class MT5Broker(BrokerAdapter):
 
     @_synchronized
     def modify_stop_loss(self, ticket: str, new_sl: float) -> None:
+        self._send_sltp(ticket, new_sl, None)
+
+    @_synchronized
+    def modify_sl_tp(self, ticket: str, new_sl: float, new_tp: float) -> None:
+        self._send_sltp(ticket, new_sl, new_tp)
+
+    def _send_sltp(self, ticket: str, new_sl: float, new_tp: float | None) -> None:
+        """Not lock-decorated — only called from inside @_synchronized methods
+        (the lock isn't reentrant, so acquiring it again here would deadlock)."""
         mt5 = self._mt5
         positions = mt5.positions_get(ticket=int(ticket))
         if not positions:
@@ -260,8 +269,8 @@ class MT5Broker(BrokerAdapter):
             "symbol": pos.symbol,
             "position": pos.ticket,
             "sl": new_sl,
-            "tp": pos.tp,
+            "tp": pos.tp if new_tp is None else new_tp,
         }
         result = mt5.order_send(request)
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
-            raise RuntimeError(f"MT5 modify stop loss failed: {result}")
+            raise RuntimeError(f"MT5 modify SL/TP failed: {result}")

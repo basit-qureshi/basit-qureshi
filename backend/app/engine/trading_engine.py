@@ -133,16 +133,25 @@ class TradingEngine:
 
         if result.signal != Signal.NONE and decision.allowed and not already_traded_this_candle:
             side = OrderSide.BUY if result.signal == Signal.BUY else OrderSide.SELL
+            # Anchor to the live price, not result.close: the signal is read off
+            # the last CLOSED candle, so by the time the order goes out the market
+            # has moved on. Pricing the bracket off that stale close left real
+            # stops anywhere from 49 to 134 points out when 100 was configured,
+            # turning a 1:2 into anything from 1:1.2 to 1:5.
             sl, tp = self.risk_manager.compute_sl_tp(
-                result.close, side.value, symbol_info.pip_size, symbol_info.min_stop_distance
+                current_price, side.value, symbol_info.pip_size, symbol_info.min_stop_distance
             )
             # Size from the ACTUAL stop distance (which the broker's minimum may
             # have widened beyond stop_loss_pips) so the money at risk stays at
             # risk_percent — sizing from the configured pips while the real SL
             # sits further away would silently multiply the risk per trade.
-            actual_stop_pips = abs(result.close - sl) / symbol_info.pip_size
+            actual_stop_pips = abs(current_price - sl) / symbol_info.pip_size
             volume = self.risk_manager.calculate_position_size(account.balance, symbol_info, actual_stop_pips)
             position = self.broker.place_order(self.symbol, side, volume, sl, tp)
+            # The fill lands on the ask (buy) or bid (sell), half a spread from
+            # the mid price used above, so re-anchor the bracket to where the
+            # trade actually opened. This is what keeps the ratio exactly 1:2.
+            position = self._reanchor_bracket(position, symbol_info)
             self.risk_manager.record_trade_opened()
             self._last_trade_candle_time = current_candle_time
             self._log_new_trade(position)
@@ -152,6 +161,24 @@ class TradingEngine:
             self._last_known_profit[p.ticket] = p.profit
 
         self._broadcast(account, open_positions, result, decision)
+
+    def _reanchor_bracket(self, position: Position, symbol_info) -> Position:
+        """Recomputes SL/TP from the price the order actually filled at and moves
+        them if they drifted. Failing to adjust is not fatal — the order already
+        carries a usable bracket — so the trade is left as-is and logged."""
+        exact_sl, exact_tp = self.risk_manager.compute_sl_tp(
+            position.open_price, position.side.value, symbol_info.pip_size, symbol_info.min_stop_distance
+        )
+        tolerance = symbol_info.pip_size  # a single point of drift isn't worth a broker round-trip
+        if abs(exact_sl - position.sl) <= tolerance and abs(exact_tp - position.tp) <= tolerance:
+            return position
+        try:
+            self.broker.modify_sl_tp(position.ticket, exact_sl, exact_tp)
+            position.sl = exact_sl
+            position.tp = exact_tp
+        except Exception:
+            logger.exception("could not re-anchor SL/TP for %s; leaving the original bracket", position.ticket)
+        return position
 
     def _take_quick_profits(self, open_positions: list[Position]) -> list[Position]:
         """Books a trade as soon as its floating profit reaches quick_profit_usd,
