@@ -83,6 +83,7 @@ class MockBroker(BrokerAdapter):
             pip_value_per_lot=10.0,  # standard approximation for a $-quoted account, 1 standard lot
             min_volume=0.01,
             volume_step=0.01,
+            spread=pip_size * 2,  # a plausible tight spread for the simulator
         )
 
     def _ensure_history(self, symbol: str, count: int) -> None:

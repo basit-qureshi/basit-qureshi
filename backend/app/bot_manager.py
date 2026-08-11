@@ -44,6 +44,8 @@ class BotManager:
             "sensitivity": settings.sensitivity,
             "max_trade_minutes": settings.max_trade_minutes,
             "quick_profit_usd": settings.quick_profit_usd,
+            "max_spread_points": settings.max_spread_points,
+            "trend_filter_timeframe": settings.trend_filter_timeframe,
             "mode": settings.account_type,
         }
         self._load_persisted_settings()
@@ -71,7 +73,9 @@ class BotManager:
     def _build_engine(self) -> TradingEngine:
         s = self.settings
         if s["strategy"] == "momentum_scalp":
-            strategy = MomentumScalpStrategy.from_sensitivity(s["sensitivity"])
+            strategy = MomentumScalpStrategy.from_sensitivity(
+                s["sensitivity"], s["trend_filter_timeframe"]
+            )
         elif s["strategy"] == "retest_rejection":
             strategy = RetestRejectionStrategy.from_sensitivity(s["sensitivity"])
         elif s["strategy"] == "scalp_breakout":
@@ -99,6 +103,7 @@ class BotManager:
             on_update=self._on_update,
             max_trade_minutes=s["max_trade_minutes"],
             quick_profit_usd=s["quick_profit_usd"],
+            max_spread_points=s["max_spread_points"],
         )
 
     def _on_update(self, payload: dict) -> None:

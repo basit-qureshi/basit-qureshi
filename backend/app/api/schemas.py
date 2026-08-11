@@ -23,6 +23,8 @@ class SettingsUpdate(BaseModel):
     sensitivity: str | None = None
     max_trade_minutes: int | None = None
     quick_profit_usd: float | None = None
+    max_spread_points: float | None = None
+    trend_filter_timeframe: str | None = None
 
 
 class ModeUpdate(BaseModel):

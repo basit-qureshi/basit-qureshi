@@ -40,6 +40,16 @@ class Settings(BaseSettings):
     # Taking profit earlier than TP shrinks the reward side of the risk:reward
     # ratio — a $2 exit against a $3 stop is 1:0.67, not 1:2.
     quick_profit_usd: float = 0
+    # Skip entries while the spread is wider than this many points — spread is
+    # paid on every scalp, and it blows out during news and thin hours.
+    # 0 = trade regardless. Gold normally sits around 20-30 points.
+    max_spread_points: float = 45
+    # Only take a signal when this timeframe's trend agrees with it. Counter-trend
+    # pushes are usually pullback noise, and they are what chops an account.
+    # Measured on simulated M1 gold, M5 gave the best result of the options
+    # (H1 was worse than no filter at all — too slow to describe an M1 scalp).
+    # "" = no filter.
+    trend_filter_timeframe: str = "M5"
     # On M1 scalping a 30s poll only looks at the market twice per candle, so a
     # setup that appears and resolves inside one candle gets missed entirely.
     poll_interval_seconds: int = 5

@@ -53,6 +53,8 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
       sensitivity: form.sensitivity,
       max_trade_minutes: Number(form.max_trade_minutes),
       quick_profit_usd: Number(form.quick_profit_usd),
+      max_spread_points: Number(form.max_spread_points),
+      trend_filter_timeframe: form.trend_filter_timeframe,
     });
     if (ok) setDirty(false);  // keep unsaved edits on screen if the save was rejected
   }
@@ -131,6 +133,29 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
             <option value="balanced">Balanced</option>
             <option value="conservative">Conservative — few trades, cleaner setups</option>
           </select>
+        </label>
+        <label>
+          Trend Filter (only trade with this trend)
+          <select
+            disabled={running}
+            value={form.trend_filter_timeframe}
+            onChange={(e) => update("trend_filter_timeframe", e.target.value)}
+          >
+            <option value="">Off — trade any M1 push</option>
+            <option value="M5">M5 trend must agree</option>
+            <option value="M15">M15 trend must agree</option>
+            <option value="H1">H1 trend must agree</option>
+          </select>
+        </label>
+        <label>
+          Max Spread (points, 0 = off)
+          <input
+            disabled={running}
+            type="number"
+            min="0"
+            value={form.max_spread_points}
+            onChange={(e) => update("max_spread_points", e.target.value)}
+          />
         </label>
         <label>
           Book profit at $ (0 = wait for TP)

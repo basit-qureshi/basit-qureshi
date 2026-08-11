@@ -123,6 +123,7 @@ class MT5Broker(BrokerAdapter):
             min_volume=info.volume_min,
             volume_step=info.volume_step,
             min_stop_distance=min_stop_distance,
+            spread=spread,
         )
 
     @_synchronized

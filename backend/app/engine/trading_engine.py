@@ -5,7 +5,7 @@ from typing import Callable, Optional
 
 from app.brokers.base import BrokerAdapter, OrderSide, Position
 from app.db import SessionLocal, TradeRecord
-from app.risk.risk_manager import RiskManager
+from app.risk.risk_manager import RiskDecision, RiskManager
 from app.strategy.ema_rsi_strategy import EmaRsiStrategy, Signal
 
 logger = logging.getLogger("trading_engine")
@@ -30,6 +30,7 @@ class TradingEngine:
         on_update: Optional[Callable[[dict], None]] = None,
         max_trade_minutes: int = 0,
         quick_profit_usd: float = 0,
+        max_spread_points: float = 0,
     ):
         self.broker = broker
         self.strategy = strategy
@@ -41,6 +42,7 @@ class TradingEngine:
         self.on_update = on_update
         self.max_trade_minutes = max_trade_minutes
         self.quick_profit_usd = quick_profit_usd
+        self.max_spread_points = max_spread_points
 
         self._running = False
         self._task: asyncio.Task | None = None
@@ -118,6 +120,16 @@ class TradingEngine:
         already_traded_this_candle = (
             current_candle_time is not None and current_candle_time == self._last_trade_candle_time
         )
+
+        # Spread is paid on every single trade, so a scalp entered during a
+        # spread spike (news, rollover, thin hours) starts far enough behind
+        # that the setup has to be right by a much wider margin to pay off.
+        spread_points = (symbol_info.spread / symbol_info.pip_size) if symbol_info.pip_size else 0
+        spread_too_wide = bool(self.max_spread_points) and spread_points > self.max_spread_points
+        if spread_too_wide and result.signal != Signal.NONE:
+            decision = RiskDecision(
+                False, f"spread too wide ({spread_points:.0f} points, limit {self.max_spread_points:.0f})"
+            )
 
         if result.signal != Signal.NONE and decision.allowed and not already_traded_this_candle:
             side = OrderSide.BUY if result.signal == Signal.BUY else OrderSide.SELL

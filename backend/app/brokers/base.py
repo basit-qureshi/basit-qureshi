@@ -39,6 +39,7 @@ class SymbolInfo:
     min_volume: float
     volume_step: float
     min_stop_distance: float = 0.0  # broker's minimum SL/TP distance from price, in price units
+    spread: float = 0.0  # current ask - bid, in price units
 
 
 class BrokerAdapter(ABC):
