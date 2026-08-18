@@ -236,6 +236,27 @@
   height: 38px;
 }
 
+/* The basket-mode toggle heads its own group of fields, so it gets a full row
+   instead of being squeezed into a column next to a number input. */
+.settings-form .settings-span {
+  grid-column: 1 / -1;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+}
+
+.settings-form .settings-span input {
+  width: auto;
+}
+
+.warn-text {
+  color: var(--red);
+}
+
 .backtest-result {
   margin-top: 20px;
 }

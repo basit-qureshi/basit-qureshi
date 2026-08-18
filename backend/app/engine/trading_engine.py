@@ -31,6 +31,11 @@ class TradingEngine:
         max_trade_minutes: int = 0,
         quick_profit_usd: float = 0,
         max_spread_points: float = 0,
+        basket_mode: bool = False,
+        basket_max_entries: int = 5,
+        basket_add_gap_points: float = 50,
+        basket_target_usd: float = 3.0,
+        basket_max_loss_usd: float = 15.0,
     ):
         self.broker = broker
         self.strategy = strategy
@@ -43,12 +48,19 @@ class TradingEngine:
         self.max_trade_minutes = max_trade_minutes
         self.quick_profit_usd = quick_profit_usd
         self.max_spread_points = max_spread_points
+        self.basket_mode = basket_mode
+        self.basket_max_entries = basket_max_entries
+        self.basket_add_gap_points = basket_add_gap_points
+        self.basket_target_usd = basket_target_usd
+        self.basket_max_loss_usd = basket_max_loss_usd
 
         self._running = False
         self._task: asyncio.Task | None = None
         self._last_error: str | None = None
         self._last_known_profit: dict[str, float] = {}
         self._last_trade_candle_time = None
+        self._last_basket_event: str | None = None
+        self._basket_closed_this_tick = False
 
     @property
     def running(self) -> bool:
@@ -90,11 +102,17 @@ class TradingEngine:
 
         symbol_info = self.broker.get_symbol_info(self.symbol)
         current_price = self.broker.get_current_price(self.symbol)
-        open_positions = self._take_quick_profits(open_positions)
-        open_positions = self._close_stale_positions(open_positions)
-        open_positions = self._apply_trailing_stop(
-            open_positions, current_price, symbol_info.pip_size, symbol_info.min_stop_distance
-        )
+        if self.basket_mode:
+            # A basket is one trade made of several tickets, so it is exited as
+            # one thing. Per-position exits (quick profit, time close, trailing)
+            # would pull individual legs out and leave the rest unmanaged.
+            open_positions = self._manage_basket(open_positions)
+        else:
+            open_positions = self._take_quick_profits(open_positions)
+            open_positions = self._close_stale_positions(open_positions)
+            open_positions = self._apply_trailing_stop(
+                open_positions, current_price, symbol_info.pip_size, symbol_info.min_stop_distance
+            )
 
         decision = self.risk_manager.evaluate(
             balance=account.balance,
@@ -114,6 +132,15 @@ class TradingEngine:
             result = self.strategy.generate_signal(candles)
         current_candle_time = candles.index[-1] if len(candles) else None
 
+        # A basket that just closed must not be rebuilt on the same candle. The
+        # signal is still firing at this moment — that is precisely why the
+        # basket existed — so without this the group stop would liquidate and
+        # then immediately re-enter the same losing direction, turning a capped
+        # loss into a repeating one.
+        if self._basket_closed_this_tick:
+            self._last_trade_candle_time = current_candle_time
+            self._basket_closed_this_tick = False
+
         # One entry per candle: after a stop-out, the same crossover keeps
         # "firing" on every poll until a new candle forms, which would
         # otherwise re-enter the same losing setup within seconds.
@@ -131,6 +158,14 @@ class TradingEngine:
                 False, f"spread too wide ({spread_points:.0f} points, limit {self.max_spread_points:.0f})"
             )
 
+        if result.signal != Signal.NONE and decision.allowed and self.basket_mode:
+            side_wanted = OrderSide.BUY if result.signal == Signal.BUY else OrderSide.SELL
+            can_add, why_not = self._basket_allows_entry(
+                open_positions, side_wanted, current_price, symbol_info.pip_size
+            )
+            if not can_add:
+                decision = RiskDecision(False, why_not)
+
         if result.signal != Signal.NONE and decision.allowed and not already_traded_this_candle:
             side = OrderSide.BUY if result.signal == Signal.BUY else OrderSide.SELL
             # Anchor to the live price, not result.close: the signal is read off
@@ -138,15 +173,13 @@ class TradingEngine:
             # has moved on. Pricing the bracket off that stale close left real
             # stops anywhere from 49 to 134 points out when 100 was configured,
             # turning a 1:2 into anything from 1:1.2 to 1:5.
-            sl, tp = self.risk_manager.compute_sl_tp(
-                current_price, side.value, symbol_info.pip_size, symbol_info.min_stop_distance
-            )
+            sl, tp = self._bracket_for(current_price, side, symbol_info)
             # Size from the ACTUAL stop distance (which the broker's minimum may
             # have widened beyond stop_loss_pips) so the money at risk stays at
             # risk_percent — sizing from the configured pips while the real SL
             # sits further away would silently multiply the risk per trade.
             actual_stop_pips = abs(current_price - sl) / symbol_info.pip_size
-            volume = self.risk_manager.calculate_position_size(account.balance, symbol_info, actual_stop_pips)
+            volume = self._entry_volume(account.balance, symbol_info, actual_stop_pips)
             position = self.broker.place_order(self.symbol, side, volume, sl, tp)
             # The fill lands on the ask (buy) or bid (sell), half a spread from
             # the mid price used above, so re-anchor the bracket to where the
@@ -162,13 +195,125 @@ class TradingEngine:
 
         self._broadcast(account, open_positions, result, decision)
 
+    def _bracket_for(self, price: float, side: OrderSide, symbol_info) -> tuple[float, float]:
+        """SL/TP prices for an order at `price`.
+
+        In basket mode the per-ticket stop is not the real stop — the basket's
+        combined loss limit is. Each leg therefore gets a backstop wide enough to
+        sit behind the whole ladder of planned entries, so a normal 100-point
+        stop can't take the first leg out before the basket has even formed. It
+        exists only to cap the damage if the bot dies with positions open.
+        """
+        if not self.basket_mode:
+            return self.risk_manager.compute_sl_tp(
+                price, side.value, symbol_info.pip_size, symbol_info.min_stop_distance
+            )
+        ladder_points = self.basket_add_gap_points * max(0, self.basket_max_entries - 1)
+        backstop_points = self.risk_manager.stop_loss_pips + ladder_points
+        return self.risk_manager.compute_sl_tp(
+            price,
+            side.value,
+            symbol_info.pip_size,
+            symbol_info.min_stop_distance,
+            stop_pips=backstop_points,
+            take_pips=backstop_points * 2,
+        )
+
+    def _entry_volume(self, balance: float, symbol_info, actual_stop_pips: float) -> float:
+        """Lot size for a new entry. Basket mode without an explicit fixed lot
+        falls back to the broker minimum rather than risk-sizing: risk sizing
+        works off the stop distance, and in basket mode that distance is a
+        deliberately huge backstop, so it would produce a meaninglessly small
+        (and misleadingly 'safe') number."""
+        if self.risk_manager.fixed_lot_size and self.risk_manager.fixed_lot_size > 0:
+            return self.risk_manager.round_volume(self.risk_manager.fixed_lot_size, symbol_info)
+        if self.basket_mode:
+            return self.risk_manager.round_volume(symbol_info.min_volume or 0.01, symbol_info)
+        return self.risk_manager.calculate_position_size(balance, symbol_info, actual_stop_pips)
+
+    def _basket_allows_entry(
+        self, open_positions: list[Position], side: OrderSide, current_price: float, pip_size: float
+    ) -> tuple[bool, str]:
+        """Gates additional entries into an existing basket: same direction only,
+        capped at basket_max_entries, and only once price has moved
+        basket_add_gap_points against the most recent entry — so the legs are
+        spaced out instead of piling up at the same price on consecutive polls."""
+        if not open_positions:
+            return True, ""
+        if any(p.side != side for p in open_positions):
+            return False, f"basket already open {open_positions[0].side.value}, signal is {side.value}"
+        if len(open_positions) >= self.basket_max_entries:
+            return False, f"basket full ({len(open_positions)}/{self.basket_max_entries} entries)"
+        last = max(open_positions, key=lambda p: p.open_time or "")
+        if side == OrderSide.BUY:
+            adverse_points = (last.open_price - current_price) / pip_size
+        else:
+            adverse_points = (current_price - last.open_price) / pip_size
+        if adverse_points < self.basket_add_gap_points:
+            return False, (
+                f"only {adverse_points:.0f} points from the last entry "
+                f"(need {self.basket_add_gap_points:.0f} against it before adding)"
+            )
+        return True, ""
+
+    def _manage_basket(self, open_positions: list[Position]) -> list[Position]:
+        """Exits the whole group on combined profit/loss, never a single leg.
+
+        The loss limit is the important half. Adding to a position that keeps
+        going against you wins small most of the time and then loses everything
+        at once; basket_max_loss_usd is what turns that tail into a number you
+        chose in advance.
+        """
+        if not open_positions:
+            return open_positions
+
+        floating = sum(p.profit or 0.0 for p in open_positions)
+        legs = len(open_positions)
+        reason = None
+        if self.basket_target_usd > 0 and floating >= self.basket_target_usd:
+            reason = f"target reached (+{floating:.2f} over {legs} entries)"
+        elif self.basket_max_loss_usd > 0 and floating <= -self.basket_max_loss_usd:
+            reason = f"group stop hit ({floating:.2f} over {legs} entries)"
+        elif self.max_trade_minutes:
+            age = self._basket_age_minutes(open_positions)
+            if age is not None and age >= self.max_trade_minutes:
+                reason = f"time limit, {age:.0f} min old ({floating:+.2f} over {legs} entries)"
+
+        if reason is None:
+            return open_positions
+
+        logger.info("closing basket: %s", reason)
+        self._last_basket_event = reason
+        self._basket_closed_this_tick = True
+        still_open = []
+        for p in open_positions:
+            try:
+                self.broker.close_position(p.ticket)
+            except Exception:
+                logger.exception("failed to close basket leg %s", p.ticket)
+                still_open.append(p)
+        return still_open
+
+    @staticmethod
+    def _basket_age_minutes(open_positions: list[Position]) -> float | None:
+        """Age of the oldest leg, in minutes."""
+        now = datetime.now(timezone.utc)
+        ages = []
+        for p in open_positions:
+            try:
+                opened = datetime.fromisoformat(p.open_time)
+            except (ValueError, TypeError):
+                continue
+            if opened.tzinfo is None:
+                opened = opened.replace(tzinfo=timezone.utc)
+            ages.append((now - opened).total_seconds() / 60)
+        return max(ages) if ages else None
+
     def _reanchor_bracket(self, position: Position, symbol_info) -> Position:
         """Recomputes SL/TP from the price the order actually filled at and moves
         them if they drifted. Failing to adjust is not fatal — the order already
         carries a usable bracket — so the trade is left as-is and logged."""
-        exact_sl, exact_tp = self.risk_manager.compute_sl_tp(
-            position.open_price, position.side.value, symbol_info.pip_size, symbol_info.min_stop_distance
-        )
+        exact_sl, exact_tp = self._bracket_for(position.open_price, position.side, symbol_info)
         tolerance = symbol_info.pip_size  # a single point of drift isn't worth a broker round-trip
         if abs(exact_sl - position.sl) <= tolerance and abs(exact_tp - position.tp) <= tolerance:
             return position
@@ -323,6 +468,15 @@ class TradingEngine:
             "risk_allowed": decision.allowed,
             "risk_reason": decision.reason,
         }
+        if self.basket_mode:
+            payload["basket"] = {
+                "entries": len(open_positions),
+                "max_entries": self.basket_max_entries,
+                "floating": round(sum(p.profit or 0.0 for p in open_positions), 2),
+                "target": self.basket_target_usd,
+                "max_loss": self.basket_max_loss_usd,
+                "last_event": self._last_basket_event,
+            }
         self.on_update(payload)
 
     def status(self) -> dict:
@@ -333,4 +487,6 @@ class TradingEngine:
             "timeframe": self.timeframe,
             "connected": self.broker.is_connected(),
             "last_error": self._last_error,
+            "basket_mode": self.basket_mode,
+            "last_basket_event": self._last_basket_event,
         }

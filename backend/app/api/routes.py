@@ -236,6 +236,7 @@ def backtest(body: BacktestRequest):
         strategy = EmaRsiStrategy()
     risk_manager = RiskManager(
         risk_percent=body.risk_percent,
+        fixed_lot_size=body.fixed_lot_size,
         stop_loss_pips=body.stop_loss_pips,
         take_profit_pips=body.take_profit_pips,
         max_open_trades=1,
@@ -249,6 +250,13 @@ def backtest(body: BacktestRequest):
             starting_balance=body.starting_balance,
             period=body.period,
             interval=body.interval,
+            basket_mode=body.basket_mode,
+            basket_max_entries=body.basket_max_entries,
+            basket_add_gap_points=body.basket_add_gap_points,
+            basket_target_usd=body.basket_target_usd,
+            basket_max_loss_usd=body.basket_max_loss_usd,
+            basket_max_bars=body.basket_max_bars,
+            spread_points=body.spread_points,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

@@ -39,6 +39,7 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
       symbol: form.symbol,
       timeframe: form.timeframe,
       risk_percent: Number(form.risk_percent),
+      fixed_lot_size: Number(form.fixed_lot_size),
       stop_loss_pips: Number(form.stop_loss_pips),
       take_profit_pips: Number(form.take_profit_pips),
       max_open_trades: Number(form.max_open_trades),
@@ -55,6 +56,11 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
       quick_profit_usd: Number(form.quick_profit_usd),
       max_spread_points: Number(form.max_spread_points),
       trend_filter_timeframe: form.trend_filter_timeframe,
+      basket_mode: Boolean(form.basket_mode),
+      basket_max_entries: Number(form.basket_max_entries),
+      basket_add_gap_points: Number(form.basket_add_gap_points),
+      basket_target_usd: Number(form.basket_target_usd),
+      basket_max_loss_usd: Number(form.basket_max_loss_usd),
     });
     if (ok) setDirty(false);  // keep unsaved edits on screen if the save was rejected
   }
@@ -89,6 +95,24 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
         Stop Loss / Take Profit are in points — on Gold one point is 0.01, so 100/200 means a $1.00 stop against a
         $2.00 target (1:2). If your broker's minimum stop distance is wider than your stop, both are widened
         together so the ratio stays the same.
+      </p>
+      <p className="muted">
+        <b>Fixed Lot Size</b> trades exactly that many lots every time. Leave it at 0 and the lot is calculated from
+        Risk per trade instead, which keeps the money at risk the same on every trade even when the stop distance
+        changes. Setting a fixed lot means the dollar risk moves around with the stop — on Gold, 0.01 lots loses
+        about $1.00 per 100 points, so a 0.05 lot with a 100-point stop is $5 a trade.
+      </p>
+      <p className="muted">
+        <b>Basket mode</b> is the multi-entry style: instead of one trade with its own take profit, it opens up to
+        "max entries" positions in the same direction (a new one only after price has moved the "gap" against the
+        last entry) and closes all of them together the moment their <i>combined</i> profit reaches the target.
+      </p>
+      <p className="muted warn-text">
+        ⚠ Read this before switching basket mode on. Adding to a position that is going against you produces a long
+        string of small wins followed by one very large loss when price simply keeps going — the small wins are not
+        evidence that it works, they are what this shape looks like before the loss arrives. The group stop is the
+        only thing that caps that loss, so set it to money you are genuinely willing to lose in one go, and test it
+        on demo for a meaningful number of trades before considering real money.
       </p>
       {running && <p className="muted">Stop the bot to change settings.</p>}
       <form className="settings-form" onSubmit={handleSubmit}>
@@ -191,6 +215,17 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
           />
         </label>
         <label>
+          Fixed Lot Size (0 = auto from risk %)
+          <input
+            disabled={running}
+            type="number"
+            step="0.01"
+            min="0"
+            value={form.fixed_lot_size}
+            onChange={(e) => update("fixed_lot_size", e.target.value)}
+          />
+        </label>
+        <label>
           Stop Loss (pips)
           <input
             disabled={running}
@@ -289,6 +324,57 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
             min="5"
             value={form.poll_interval_seconds}
             onChange={(e) => update("poll_interval_seconds", e.target.value)}
+          />
+        </label>
+        <label className="settings-span">
+          <input
+            disabled={running}
+            type="checkbox"
+            checked={Boolean(form.basket_mode)}
+            onChange={(e) => update("basket_mode", e.target.checked)}
+          />{" "}
+          Basket mode — stack several entries and close them together
+        </label>
+        <label>
+          Basket: max entries
+          <input
+            disabled={running || !form.basket_mode}
+            type="number"
+            min="1"
+            value={form.basket_max_entries}
+            onChange={(e) => update("basket_max_entries", e.target.value)}
+          />
+        </label>
+        <label>
+          Basket: gap before adding (points)
+          <input
+            disabled={running || !form.basket_mode}
+            type="number"
+            min="1"
+            value={form.basket_add_gap_points}
+            onChange={(e) => update("basket_add_gap_points", e.target.value)}
+          />
+        </label>
+        <label>
+          Basket: close group at $ profit
+          <input
+            disabled={running || !form.basket_mode}
+            type="number"
+            step="0.5"
+            min="0.5"
+            value={form.basket_target_usd}
+            onChange={(e) => update("basket_target_usd", e.target.value)}
+          />
+        </label>
+        <label>
+          Basket: group stop at $ loss
+          <input
+            disabled={running || !form.basket_mode}
+            type="number"
+            step="1"
+            min="1"
+            value={form.basket_max_loss_usd}
+            onChange={(e) => update("basket_max_loss_usd", e.target.value)}
           />
         </label>
         <button className="btn btn-primary" type="submit" disabled={running || saving}>

@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     symbol: str = "XAUUSD"  # Gold. Use your broker's exact name, e.g. Exness Standard uses "XAUUSDm".
     timeframe: str = "M1"
     risk_percent: float = 1.0
+    # Trade a fixed lot size instead of sizing from risk_percent. 0 = size from
+    # risk. A fixed size ignores the stop distance, so the money at risk moves
+    # around with it — handy for testing, worse for consistent risk.
+    fixed_lot_size: float = 0
     # For Gold (2-digit quotes) one point = 0.01, so 100/200 is a $1.00 stop
     # against a $2.00 target — the 1:2 risk:reward used by the retest strategy.
     stop_loss_pips: float = 100
@@ -53,6 +57,22 @@ class Settings(BaseSettings):
     # paid on every scalp, and it blows out during news and thin hours.
     # 0 = trade regardless. Gold normally sits around 20-30 points.
     max_spread_points: float = 45
+    # --- Basket (multi-entry) scalping ---------------------------------------
+    # Instead of one trade with its own TP, stack several entries in the same
+    # direction and manage them as one group: close the whole basket when its
+    # COMBINED floating profit hits basket_target_usd.
+    #
+    # Be clear-eyed about what this is. Adding to a position that is moving
+    # against you produces a long run of small wins and then one very large
+    # loss when price keeps going — the small wins are not evidence it works,
+    # they are what this shape looks like before the loss arrives.
+    # basket_max_loss_usd is therefore not optional decoration: it is the only
+    # thing standing between this mode and an account-sized loss.
+    basket_mode: bool = False
+    basket_max_entries: int = 5
+    basket_add_gap_points: float = 50  # price must move this far against the last entry before adding
+    basket_target_usd: float = 3.0  # close the whole group at this combined profit
+    basket_max_loss_usd: float = 15.0  # hard group stop — close everything, take the loss
     # Only take a signal when this timeframe's trend agrees with it. Counter-trend
     # pushes are usually pullback noise, and they are what chops an account.
     # Measured on simulated M1 gold, M5 gave the best result of the options

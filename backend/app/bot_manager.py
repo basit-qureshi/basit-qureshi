@@ -30,6 +30,7 @@ class BotManager:
             "symbol": settings.symbol,
             "timeframe": settings.timeframe,
             "risk_percent": settings.risk_percent,
+            "fixed_lot_size": settings.fixed_lot_size,
             "stop_loss_pips": settings.stop_loss_pips,
             "take_profit_pips": settings.take_profit_pips,
             "max_open_trades": settings.max_open_trades,
@@ -46,6 +47,11 @@ class BotManager:
             "quick_profit_usd": settings.quick_profit_usd,
             "max_spread_points": settings.max_spread_points,
             "trend_filter_timeframe": settings.trend_filter_timeframe,
+            "basket_mode": settings.basket_mode,
+            "basket_max_entries": settings.basket_max_entries,
+            "basket_add_gap_points": settings.basket_add_gap_points,
+            "basket_target_usd": settings.basket_target_usd,
+            "basket_max_loss_usd": settings.basket_max_loss_usd,
             "mode": settings.account_type,
         }
         self._load_persisted_settings()
@@ -82,11 +88,16 @@ class BotManager:
             strategy = ScalpBreakoutStrategy(ema_fast=s["ema_fast_period"], ema_slow=s["ema_slow_period"])
         else:
             strategy = EmaRsiStrategy(ema_fast=s["ema_fast_period"], ema_slow=s["ema_slow_period"])
+        # In basket mode the group IS the trade, so the cap on concurrent
+        # tickets has to be the basket size — otherwise max_open_trades would
+        # stop the ladder halfway and leave a half-built basket unmanaged.
+        max_open_trades = s["basket_max_entries"] if s["basket_mode"] else s["max_open_trades"]
         risk_manager = RiskManager(
             risk_percent=s["risk_percent"],
+            fixed_lot_size=s["fixed_lot_size"],
             stop_loss_pips=s["stop_loss_pips"],
             take_profit_pips=s["take_profit_pips"],
-            max_open_trades=s["max_open_trades"],
+            max_open_trades=max_open_trades,
             max_daily_loss_percent=s["max_daily_loss_percent"],
             max_daily_trades=s["max_daily_trades"],
             breakeven_trigger_pips=s["breakeven_trigger_pips"],
@@ -104,6 +115,11 @@ class BotManager:
             max_trade_minutes=s["max_trade_minutes"],
             quick_profit_usd=s["quick_profit_usd"],
             max_spread_points=s["max_spread_points"],
+            basket_mode=s["basket_mode"],
+            basket_max_entries=s["basket_max_entries"],
+            basket_add_gap_points=s["basket_add_gap_points"],
+            basket_target_usd=s["basket_target_usd"],
+            basket_max_loss_usd=s["basket_max_loss_usd"],
         )
 
     def _on_update(self, payload: dict) -> None:

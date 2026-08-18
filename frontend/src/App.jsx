@@ -18,6 +18,7 @@ export default function App() {
   const [liveAccount, setLiveAccount] = useState(null);
   const [liveOpenPositions, setLiveOpenPositions] = useState([]);
   const [lastSignal, setLastSignal] = useState(null);
+  const [basket, setBasket] = useState(null);
   const [busy, setBusy] = useState(false);
   const [globalError, setGlobalError] = useState(null);
   const [tab, setTab] = useState("dashboard");
@@ -92,6 +93,7 @@ export default function App() {
           risk_allowed: payload.risk_allowed,
           risk_reason: payload.risk_reason,
         });
+        setBasket(payload.basket || null);
       }
     });
     return () => {
@@ -185,6 +187,20 @@ export default function App() {
               <p className={lastSignal.risk_allowed ? "tone-green" : "tone-red"}>
                 Risk check: {lastSignal.risk_allowed ? "allowed" : "blocked"} ({lastSignal.risk_reason})
               </p>
+            </div>
+          )}
+
+          {basket && (
+            <div className="panel signal-panel">
+              <h3>Basket</h3>
+              <p>
+                {basket.entries} of {basket.max_entries} entries open — combined{" "}
+                <b className={basket.floating >= 0 ? "tone-green" : "tone-red"}>
+                  {basket.floating >= 0 ? "+" : "-"}${Math.abs(basket.floating).toFixed(2)}
+                </b>{" "}
+                (closes all at +${basket.target}, group stop at -${basket.max_loss})
+              </p>
+              {basket.last_event && <p className="muted">Last group exit: {basket.last_event}</p>}
             </div>
           )}
 

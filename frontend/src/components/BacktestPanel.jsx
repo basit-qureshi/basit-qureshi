@@ -14,6 +14,13 @@ export default function BacktestPanel({ onRun }) {
     take_profit_pips: 200,
     strategy: "momentum_scalp",
     sensitivity: "balanced",
+    spread_points: 24,
+    fixed_lot_size: 0,
+    basket_mode: false,
+    basket_max_entries: 5,
+    basket_add_gap_points: 50,
+    basket_target_usd: 3,
+    basket_max_loss_usd: 15,
   });
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
@@ -34,6 +41,13 @@ export default function BacktestPanel({ onRun }) {
         risk_percent: Number(form.risk_percent),
         stop_loss_pips: Number(form.stop_loss_pips),
         take_profit_pips: Number(form.take_profit_pips),
+        spread_points: Number(form.spread_points),
+        fixed_lot_size: Number(form.fixed_lot_size),
+        basket_mode: Boolean(form.basket_mode),
+        basket_max_entries: Number(form.basket_max_entries),
+        basket_add_gap_points: Number(form.basket_add_gap_points),
+        basket_target_usd: Number(form.basket_target_usd),
+        basket_max_loss_usd: Number(form.basket_max_loss_usd),
       });
       setResult(data);
     } catch (err) {
@@ -109,10 +123,78 @@ export default function BacktestPanel({ onRun }) {
           Take Profit (pips)
           <input type="number" value={form.take_profit_pips} onChange={(e) => update("take_profit_pips", e.target.value)} />
         </label>
+        <label>
+          Spread (points, charged per entry)
+          <input type="number" value={form.spread_points} onChange={(e) => update("spread_points", e.target.value)} />
+        </label>
+        <label>
+          Fixed Lot (0 = from risk %)
+          <input
+            type="number"
+            step="0.01"
+            min="0"
+            value={form.fixed_lot_size}
+            onChange={(e) => update("fixed_lot_size", e.target.value)}
+          />
+        </label>
+        <label className="settings-span">
+          <input
+            type="checkbox"
+            checked={Boolean(form.basket_mode)}
+            onChange={(e) => update("basket_mode", e.target.checked)}
+          />{" "}
+          Test basket mode (multi-entry, exited as a group)
+        </label>
+        <label>
+          Basket: max entries
+          <input
+            type="number"
+            min="1"
+            disabled={!form.basket_mode}
+            value={form.basket_max_entries}
+            onChange={(e) => update("basket_max_entries", e.target.value)}
+          />
+        </label>
+        <label>
+          Basket: gap before adding (points)
+          <input
+            type="number"
+            min="1"
+            disabled={!form.basket_mode}
+            value={form.basket_add_gap_points}
+            onChange={(e) => update("basket_add_gap_points", e.target.value)}
+          />
+        </label>
+        <label>
+          Basket: group target $
+          <input
+            type="number"
+            step="0.5"
+            disabled={!form.basket_mode}
+            value={form.basket_target_usd}
+            onChange={(e) => update("basket_target_usd", e.target.value)}
+          />
+        </label>
+        <label>
+          Basket: group stop $
+          <input
+            type="number"
+            step="1"
+            disabled={!form.basket_mode}
+            value={form.basket_max_loss_usd}
+            onChange={(e) => update("basket_max_loss_usd", e.target.value)}
+          />
+        </label>
         <button className="btn btn-primary" type="submit" disabled={loading}>
           {loading ? "Running..." : "Run Backtest"}
         </button>
       </form>
+      <p className="muted">
+        Spread is charged on every entry, so leaving it at 0 will make any fast strategy look far better than it can
+        be. On gold it is normally 20–30 points. This matters most in basket mode: the group target is a fixed dollar
+        amount, so more entries means a smaller price move is needed to reach it — while the spread paid to open
+        those entries keeps adding up.
+      </p>
 
       {error && <p className="error-text">⚠ {error}</p>}
 
@@ -145,7 +227,20 @@ export default function BacktestPanel({ onRun }) {
               <div className="card-label">Ending Balance</div>
               <div className="card-value">${result.ending_balance}</div>
             </div>
+            <div className="card">
+              <div className="card-label">Worst Single Trade</div>
+              <div className="card-value tone-red">${result.worst_trade ?? "—"}</div>
+            </div>
+            <div className="card">
+              <div className="card-label">Best Single Trade</div>
+              <div className="card-value tone-green">${result.best_trade ?? "—"}</div>
+            </div>
           </div>
+          <p className="muted">
+            Read <b>Worst Single Trade</b> next to Win Rate, not on its own. A high win rate with one very large loss
+            is the signature of a system that pays out small and often and takes it all back at once — that shape can
+            look excellent for weeks before it doesn't.
+          </p>
           <EquityChart data={result.equity_curve} title="Backtest Equity Curve" />
         </div>
       )}

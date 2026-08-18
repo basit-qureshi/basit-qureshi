@@ -26,8 +26,10 @@ class RiskManager:
         max_daily_trades: int = 0,
         breakeven_trigger_pips: float = 0,
         trailing_stop_pips: float = 0,
+        fixed_lot_size: float = 0,
     ):
         self.risk_percent = risk_percent
+        self.fixed_lot_size = fixed_lot_size  # 0 = size from risk_percent
         self.stop_loss_pips = stop_loss_pips
         self.take_profit_pips = take_profit_pips
         self.max_open_trades = max_open_trades
@@ -67,14 +69,24 @@ class RiskManager:
         Pass stop_pips when the actual stop distance differs from the configured
         stop_loss_pips (e.g. widened to the broker's minimum) — sizing must use
         the distance the SL will really sit at, or the true risk multiplies.
+
+        When fixed_lot_size is set it wins outright: the lot is whatever was
+        asked for and the money at risk becomes whatever the stop distance
+        happens to make it, which is the trade-off of choosing the lot by hand.
         """
+        if self.fixed_lot_size and self.fixed_lot_size > 0:
+            return self.round_volume(self.fixed_lot_size, symbol_info)
         effective_stop_pips = stop_pips if stop_pips and stop_pips > 0 else self.stop_loss_pips
         risk_amount = balance * (self.risk_percent / 100)
         pip_value_per_lot = symbol_info.pip_value_per_lot or 10.0
         raw_lots = risk_amount / (effective_stop_pips * pip_value_per_lot)
+        return self.round_volume(raw_lots, symbol_info)
+
+    @staticmethod
+    def round_volume(lots: float, symbol_info: SymbolInfo) -> float:
+        """Snaps a lot size to the broker's volume step and minimum."""
         step = symbol_info.volume_step or 0.01
-        lots = max(symbol_info.min_volume, round(raw_lots / step) * step)
-        return round(lots, 2)
+        return round(max(symbol_info.min_volume, round(lots / step) * step), 2)
 
     def evaluate(self, balance: float, equity: float, open_trade_count: int, symbol_info: SymbolInfo) -> RiskDecision:
         self._roll_day_if_needed(equity)
@@ -95,7 +107,13 @@ class RiskManager:
         return RiskDecision(True, "ok", volume=volume)
 
     def compute_sl_tp(
-        self, entry_price: float, side: str, pip_size: float, min_stop_distance: float = 0.0
+        self,
+        entry_price: float,
+        side: str,
+        pip_size: float,
+        min_stop_distance: float = 0.0,
+        stop_pips: float | None = None,
+        take_pips: float | None = None,
     ) -> tuple[float, float]:
         # Some symbols (e.g. Gold) enforce a broker-side minimum distance between
         # price and SL/TP that can be wider than a "normal" pip-based stop —
@@ -103,8 +121,12 @@ class RiskManager:
         # When the stop gets widened, the target is scaled by the same factor so
         # the configured risk:reward (e.g. 1:2) survives; widening each side
         # independently would quietly flatten it toward 1:1.
-        wanted_sl = self.stop_loss_pips * pip_size
-        wanted_tp = self.take_profit_pips * pip_size
+        # stop_pips/take_pips let a caller override the configured distances for
+        # one order — basket mode uses it to put a far-away disaster backstop
+        # behind a ladder of entries instead of a per-trade stop that would take
+        # the first leg out before the ladder is even built.
+        wanted_sl = (stop_pips if stop_pips is not None else self.stop_loss_pips) * pip_size
+        wanted_tp = (take_pips if take_pips is not None else self.take_profit_pips) * pip_size
         reward_ratio = (wanted_tp / wanted_sl) if wanted_sl > 0 else 2.0
         distance_sl = max(wanted_sl, min_stop_distance)
         distance_tp = max(distance_sl * reward_ratio, min_stop_distance)
