@@ -53,6 +53,7 @@ def run_backtest(
     basket_max_loss_usd: float = 15.0,
     basket_max_bars: int = 0,
     spread_points: float = 0,
+    setup_expiry_minutes: int = 45,
 ) -> dict:
     df = fetch_history(symbol, period, interval)
     pip_size = _PIP_SIZES.get(symbol, 0.0001)
@@ -72,6 +73,7 @@ def run_backtest(
             period=period,
             interval=interval,
             spread_points=spread_points,
+            setup_expiry_minutes=setup_expiry_minutes,
         )
 
     if basket_mode:
@@ -222,6 +224,7 @@ def _run_smc_backtest(
     period: str,
     interval: str,
     spread_points: float,
+    setup_expiry_minutes: int = 45,
 ) -> dict:
     """Replays the SMC strategy bar by bar, including the parts of it that live
     in the engine rather than in the strategy: waiting for the entry zone, the
@@ -243,8 +246,12 @@ def _run_smc_backtest(
     pending_since = None
     open_trade = None
 
-    expiry = getattr(strategy, "setup_expiry_minutes", 45)
+    expiry = setup_expiry_minutes
     fallback_min_rr = getattr(strategy, "fallback_min_rr", 1.0)
+    # Where setups go tells you far more than the trade count alone: a bot that
+    # finds structure but never fills is a different problem from one that finds
+    # no structure at all.
+    armed = expired = broken = 0
 
     for i in range(200, len(df)):
         bar = df.iloc[i]
@@ -292,11 +299,12 @@ def _run_smc_backtest(
             setup = strategy.generate_setup(m15, m5, m1, float(bar["close"]), pip_size, spread)
             if setup.signal != Signal.NONE:
                 pending, pending_since = setup, now
+                armed += 1
 
         elif open_trade is None and pending is not None:
             is_buy = pending.signal == Signal.BUY
             stale = expiry and (now - pending_since).total_seconds() / 60 >= expiry
-            broken = bar["low"] < pending.sl if is_buy else bar["high"] > pending.sl
+            zone_broken = bar["low"] < pending.sl if is_buy else bar["high"] > pending.sl
             tapped = bar["low"] <= pending.entry if is_buy else bar["high"] >= pending.entry
             ran_away = bar["high"] >= pending.fallback_price if is_buy else bar["low"] <= pending.fallback_price
 
@@ -321,7 +329,9 @@ def _run_smc_backtest(
                     "open_index": i, "entered": entered,
                 }
                 pending = pending_since = None
-            elif stale or broken:
+            elif stale or zone_broken:
+                expired += 1 if stale else 0
+                broken += 0 if stale else 1
                 pending = pending_since = None
 
         floating = 0.0
@@ -341,6 +351,12 @@ def _run_smc_backtest(
     result["entry_breakdown"] = {
         "tap": {"count": len(taps), "profit": round(sum(t["profit"] for t in taps), 2)},
         "fallback": {"count": len(fallbacks), "profit": round(sum(t["profit"] for t in fallbacks), 2)},
+    }
+    result["setup_funnel"] = {
+        "armed": armed,
+        "filled": len(trades),
+        "expired": expired,
+        "invalidated": broken,
     }
     return result
 

@@ -260,6 +260,7 @@ def backtest(body: BacktestRequest):
             basket_max_loss_usd=body.basket_max_loss_usd,
             basket_max_bars=body.basket_max_bars,
             spread_points=body.spread_points,
+            setup_expiry_minutes=body.setup_expiry_minutes,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

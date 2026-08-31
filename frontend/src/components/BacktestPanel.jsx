@@ -164,6 +164,15 @@ export default function BacktestPanel({ onRun }) {
             is the signature of a system that pays out small and often and takes it all back at once — that shape can
             look excellent for weeks before it doesn't.
           </p>
+          {result.setup_funnel && (
+            <p className="muted">
+              <b>Setups:</b> {result.setup_funnel.armed} found · {result.setup_funnel.filled} filled ·{" "}
+              {result.setup_funnel.expired} expired unfilled · {result.setup_funnel.invalidated} invalidated when
+              price broke the zone. If very few are <i>found</i>, the structure filters are too tight for this data —
+              loosen Sensitivity or lower Min RR. If many are found but few <i>fill</i>, the entries are the problem —
+              lower Fallback distance so the bot takes more of them at market.
+            </p>
+          )}
           {result.entry_breakdown && (
             <p className="muted">
               <b>Entries:</b> {result.entry_breakdown.tap.count} on a zone tap (${result.entry_breakdown.tap.profit}),{" "}

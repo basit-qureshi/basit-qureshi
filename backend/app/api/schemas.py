@@ -69,3 +69,4 @@ class BacktestRequest(BaseModel):
     # Cost charged on every entry. Leaving it at 0 makes any high-frequency
     # result meaningless; gold typically sits around 20-30 points.
     spread_points: float = 24
+    setup_expiry_minutes: int = 45
