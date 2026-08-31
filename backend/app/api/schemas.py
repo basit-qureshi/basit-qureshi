@@ -36,6 +36,8 @@ class SettingsUpdate(BaseModel):
     smc_fallback_points: float | None = None
     smc_fallback_min_rr: float | None = None
     smc_setup_expiry_minutes: int | None = None
+    smc_mss_max_age: int | None = None
+    smc_zone_tolerance_points: float | None = None
 
 
 class ModeUpdate(BaseModel):

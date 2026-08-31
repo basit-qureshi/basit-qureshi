@@ -110,6 +110,15 @@ class Settings(BaseSettings):
     # Drop a planned setup that has not filled within this many minutes. The
     # structure it was read from goes stale.
     smc_setup_expiry_minutes: int = 45
+    # The two gates that decide how OFTEN a setup appears at all.
+    # How long after an M1 market structure shift the shift still counts, in M1
+    # bars. Price can sit inside an order block for a while before turning, and
+    # too short a window throws those away before the turn happens.
+    smc_mss_max_age: int = 15
+    # How close to the M15 order block counts as "price has reached it", in
+    # points. Widening this catches setups where price stops just short of the
+    # zone; too wide and it arms setups price never really came back for.
+    smc_zone_tolerance_points: float = 20
     # How permissive the entry filters are: "aggressive" trades far more often
     # (each signal is weaker), "conservative" waits for cleaner setups.
     sensitivity: str = "balanced"

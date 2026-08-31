@@ -58,6 +58,8 @@ class BotManager:
             "smc_fallback_points": settings.smc_fallback_points,
             "smc_fallback_min_rr": settings.smc_fallback_min_rr,
             "smc_setup_expiry_minutes": settings.smc_setup_expiry_minutes,
+            "smc_mss_max_age": settings.smc_mss_max_age,
+            "smc_zone_tolerance_points": settings.smc_zone_tolerance_points,
             "mode": settings.account_type,
         }
         self._load_persisted_settings()
@@ -91,6 +93,8 @@ class BotManager:
                 min_rr=s["smc_min_rr"],
                 fallback_points=s["smc_fallback_points"],
                 fallback_min_rr=s["smc_fallback_min_rr"],
+                mss_max_age=s["smc_mss_max_age"],
+                zone_tolerance_points=s["smc_zone_tolerance_points"],
             )
         elif s["strategy"] == "momentum_scalp":
             strategy = MomentumScalpStrategy.from_sensitivity(

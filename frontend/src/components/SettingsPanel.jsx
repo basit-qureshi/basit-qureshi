@@ -52,6 +52,8 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
       smc_fallback_points: Number(form.smc_fallback_points),
       smc_fallback_min_rr: Number(form.smc_fallback_min_rr),
       smc_setup_expiry_minutes: Number(form.smc_setup_expiry_minutes),
+      smc_mss_max_age: Number(form.smc_mss_max_age),
+      smc_zone_tolerance_points: Number(form.smc_zone_tolerance_points),
     });
     if (ok) setDirty(false); // keep unsaved edits on screen if the save was rejected
   }
@@ -81,6 +83,13 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
       <p className="muted">
         <b>Stop trailing</b> follows the reward:risk ladder automatically: at 1:1 the stop moves to breakeven, at
         1:2 it moves to 1:1, at 1:3 to 1:2, and so on for as long as the trade keeps running.
+      </p>
+      <p className="muted">
+        <b>If the bot trades too rarely</b>, these two are the knobs that change how often a setup appears at all.{" "}
+        <i>MSS still counts for</i> is how long after an M1 structure shift the shift is still treated as valid —
+        price can sit inside an order block for a while before it turns, and too short a window throws those setups
+        away before the turn happens. <i>Zone tolerance</i> is how close to the M15 order block counts as reaching
+        it. Widen them for more setups; each one will be a little looser than the last.
       </p>
       <p className="muted">
         <b>Min RR</b> is the filter that decides whether a setup is worth taking at all. The target is wherever the
@@ -180,6 +189,28 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
             min="0"
             value={form.smc_setup_expiry_minutes}
             onChange={(e) => update("smc_setup_expiry_minutes", e.target.value)}
+          />
+        </label>
+
+        <label className="settings-span">How often setups appear</label>
+        <label>
+          MSS still counts for (M1 bars)
+          <input
+            disabled={running}
+            type="number"
+            min="1"
+            value={form.smc_mss_max_age}
+            onChange={(e) => update("smc_mss_max_age", e.target.value)}
+          />
+        </label>
+        <label>
+          Zone tolerance (points)
+          <input
+            disabled={running}
+            type="number"
+            min="0"
+            value={form.smc_zone_tolerance_points}
+            onChange={(e) => update("smc_zone_tolerance_points", e.target.value)}
           />
         </label>
 
