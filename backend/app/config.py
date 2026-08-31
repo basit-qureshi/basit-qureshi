@@ -87,11 +87,29 @@ class Settings(BaseSettings):
     max_trade_minutes: int = 15
     ema_fast_period: int = 5  # lower = faster/more frequent signals, more noise
     ema_slow_period: int = 13
-    # "momentum_scalp"   = trend + strong push candle (fires many times an hour)
-    # "retest_rejection" = M5 breakout, M1 retest + rejection entry (few, selective)
-    # "scalp_breakout"   = trend + breakout + volume, single timeframe
-    # "ema_rsi"          = classic EMA crossover with RSI filter
-    strategy: str = "momentum_scalp"
+    # "smc" = Smart Money Concepts: M15 BOS -> order block + FVG -> M1 market
+    # structure shift -> M5 entry zone. This is the only strategy offered in the
+    # dashboard; the older signal strategies still exist in the code and can be
+    # named here, but they are not selectable and are not maintained.
+    strategy: str = "smc"
+
+    # --- SMC settings ---------------------------------------------------------
+    # How far beyond the M5 entry zone the stop sits, on top of the live spread.
+    # A stop resting exactly on the zone's edge gets taken out by the spread and
+    # a single wick before the move it was placed for.
+    smc_sl_buffer_points: float = 20
+    # Minimum reward:risk before a setup is accepted at all. The structural
+    # target is wherever the BOS ran to, so this is what stops the bot taking
+    # setups whose target is too close to be worth the stop.
+    smc_min_rr: float = 2.0
+    # If price never comes back for the entry and instead runs this far past the
+    # M1 shift, take the trade at market rather than watch the move go without
+    # it — but only while at least smc_fallback_min_rr remains.
+    smc_fallback_points: float = 150
+    smc_fallback_min_rr: float = 1.0
+    # Drop a planned setup that has not filled within this many minutes. The
+    # structure it was read from goes stale.
+    smc_setup_expiry_minutes: int = 45
     # How permissive the entry filters are: "aggressive" trades far more often
     # (each signal is weaker), "conservative" waits for cleaner setups.
     sensitivity: str = "balanced"

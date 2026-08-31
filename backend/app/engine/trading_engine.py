@@ -36,6 +36,7 @@ class TradingEngine:
         basket_add_gap_points: float = 50,
         basket_target_usd: float = 3.0,
         basket_max_loss_usd: float = 15.0,
+        setup_expiry_minutes: int = 45,
     ):
         self.broker = broker
         self.strategy = strategy
@@ -61,6 +62,15 @@ class TradingEngine:
         self._last_trade_candle_time = None
         self._last_basket_event: str | None = None
         self._basket_closed_this_tick = False
+        self.setup_expiry_minutes = setup_expiry_minutes
+        # Structural strategies (SMC) plan a trade before it can be taken: the
+        # plan waits here until price taps the entry zone or runs away from it.
+        self._pending_setup = None
+        self._pending_since: datetime | None = None
+        self._last_setup_stage: str | None = None
+        # Distance from entry to the ORIGINAL stop, per ticket, so the R ladder
+        # keeps measuring against the risk actually taken as the stop moves up.
+        self._initial_risk: dict[str, float] = {}
 
     @property
     def running(self) -> bool:
@@ -102,6 +112,11 @@ class TradingEngine:
 
         symbol_info = self.broker.get_symbol_info(self.symbol)
         current_price = self.broker.get_current_price(self.symbol)
+
+        if getattr(self.strategy, "is_structural", False):
+            self._structural_tick(open_positions, account, symbol_info, current_price)
+            return
+
         if self.basket_mode:
             # A basket is one trade made of several tickets, so it is exited as
             # one thing. Per-position exits (quick profit, time close, trailing)
@@ -194,6 +209,205 @@ class TradingEngine:
             self._last_known_profit[p.ticket] = p.profit
 
         self._broadcast(account, open_positions, result, decision)
+
+    def _structural_tick(self, open_positions, account, symbol_info, current_price: float) -> None:
+        """One poll of a strategy that prices its own stop and target (SMC).
+
+        Unlike the signal strategies, a setup here is a plan made in advance:
+        it names the price to enter at, and then the engine waits. Two things
+        can end that wait — price tapping the entry zone, or price running far
+        enough in the trade's direction that waiting any longer means missing
+        the move entirely.
+        """
+        pip = symbol_info.pip_size
+        open_positions = self._apply_rr_ladder(
+            open_positions, current_price, symbol_info.min_stop_distance
+        )
+
+        decision = self.risk_manager.evaluate(
+            balance=account.balance,
+            equity=account.equity,
+            open_trade_count=len(open_positions),
+            symbol_info=symbol_info,
+        )
+        spread_points = (symbol_info.spread / pip) if pip else 0
+        if bool(self.max_spread_points) and spread_points > self.max_spread_points:
+            decision = RiskDecision(
+                False, f"spread too wide ({spread_points:.0f} points, limit {self.max_spread_points:.0f})"
+            )
+
+        setup = self._pending_setup
+        if setup is None:
+            m15 = self.broker.get_candles(self.symbol, "M15", 200)
+            m5 = self.broker.get_candles(self.symbol, "M5", 200)
+            m1 = self.broker.get_candles(self.symbol, "M1", 200)
+            found = self.strategy.generate_setup(m15, m5, m1, current_price, pip, symbol_info.spread)
+            self._last_setup_stage = found.stage
+            if found.signal != Signal.NONE:
+                setup = self._pending_setup = found
+                self._pending_since = datetime.now(timezone.utc)
+                logger.info("SMC setup armed: %s", found.reason)
+            self._broadcast_structural(account, open_positions, found, decision)
+            return
+
+        entered_reason = None
+        if self._setup_expired() or self._setup_invalidated(setup, current_price):
+            logger.info("SMC setup dropped: %s", self._last_setup_stage)
+            self._clear_setup()
+            self._broadcast_structural(account, open_positions, setup, decision)
+            return
+
+        is_buy = setup.signal == Signal.BUY
+        tapped = current_price <= setup.entry if is_buy else current_price >= setup.entry
+        ran_away = (
+            current_price >= setup.fallback_price if is_buy else current_price <= setup.fallback_price
+        )
+
+        entry_price = setup.entry
+        if tapped:
+            entered_reason = "entry zone tapped"
+            entry_price = current_price
+        elif ran_away:
+            # Price left without giving the entry. Taking it at market here is
+            # the fix for setups that reached target having never been filled —
+            # but only while what remains is still worth the risk.
+            remaining_risk = abs(current_price - setup.sl)
+            remaining_reward = abs(setup.tp - current_price)
+            rr_left = remaining_reward / remaining_risk if remaining_risk > 0 else 0
+            min_rr = getattr(self.strategy, "fallback_min_rr", 1.0)
+            if rr_left >= min_rr:
+                entered_reason = f"never tapped, entered at market with 1:{rr_left:.1f} left"
+                entry_price = current_price
+            else:
+                logger.info("SMC setup dropped: ran away, only 1:%.1f left", rr_left)
+                self._clear_setup()
+                self._broadcast_structural(account, open_positions, setup, decision)
+                return
+
+        if entered_reason is None or not decision.allowed:
+            self._broadcast_structural(account, open_positions, setup, decision)
+            return
+
+        side = OrderSide.BUY if is_buy else OrderSide.SELL
+        sl, tp = self._clamp_structural_bracket(entry_price, setup, side, symbol_info)
+        stop_pips = abs(entry_price - sl) / pip
+        volume = self._entry_volume(account.balance, symbol_info, stop_pips)
+        position = self.broker.place_order(self.symbol, side, volume, sl, tp)
+        self._initial_risk[position.ticket] = abs(position.open_price - sl)
+        self.risk_manager.record_trade_opened()
+        self._log_new_trade(position)
+        logger.info("SMC entry (%s): %s", entered_reason, setup.reason)
+        self._clear_setup()
+        open_positions = open_positions + [position]
+        self._broadcast_structural(account, open_positions, setup, decision)
+
+    def _clamp_structural_bracket(self, entry_price, setup, side: OrderSide, symbol_info):
+        """Keeps a structural stop/target legal for the broker.
+
+        The zone can sit closer to price than the broker's minimum stop
+        distance allows. When the stop has to be pushed out, the target is
+        pushed with it so the reward:risk the setup was accepted on survives.
+        """
+        min_distance = symbol_info.min_stop_distance
+        sl, tp = setup.sl, setup.tp
+        risk = abs(entry_price - sl)
+        reward = abs(tp - entry_price)
+        ratio = (reward / risk) if risk > 0 else 2.0
+        if min_distance and risk < min_distance:
+            risk = min_distance
+            reward = risk * ratio
+            if side == OrderSide.BUY:
+                sl, tp = entry_price - risk, entry_price + reward
+            else:
+                sl, tp = entry_price + risk, entry_price - reward
+        elif min_distance and reward < min_distance:
+            tp = entry_price + min_distance if side == OrderSide.BUY else entry_price - min_distance
+        return sl, tp
+
+    def _setup_expired(self) -> bool:
+        if not self.setup_expiry_minutes or self._pending_since is None:
+            return False
+        age = (datetime.now(timezone.utc) - self._pending_since).total_seconds() / 60
+        if age >= self.setup_expiry_minutes:
+            self._last_setup_stage = f"setup expired after {age:.0f} min without an entry"
+            return True
+        return False
+
+    def _setup_invalidated(self, setup, current_price: float) -> bool:
+        """Price closing through the far side of the entry zone means the level
+        the plan was built on did not hold, so the plan goes with it."""
+        if setup.signal == Signal.BUY and current_price < setup.sl:
+            self._last_setup_stage = "price broke below the entry zone before filling"
+            return True
+        if setup.signal == Signal.SELL and current_price > setup.sl:
+            self._last_setup_stage = "price broke above the entry zone before filling"
+            return True
+        return False
+
+    def _clear_setup(self) -> None:
+        self._pending_setup = None
+        self._pending_since = None
+
+    def _apply_rr_ladder(self, open_positions, current_price: float, min_stop_distance: float):
+        """Moves the stop up the R ladder: breakeven at 1R, 1R at 2R, and so on."""
+        for p in open_positions:
+            risk = self._initial_risk.get(p.ticket)
+            if risk is None:
+                # Reconstructed after a restart: the stop may already have moved,
+                # so this is the best estimate available rather than the truth.
+                risk = abs(p.open_price - p.sl)
+                self._initial_risk[p.ticket] = risk
+            new_sl = self.risk_manager.compute_rr_ladder_sl(
+                p.side.value, p.open_price, risk, p.sl, current_price, min_stop_distance
+            )
+            if new_sl is not None:
+                try:
+                    self.broker.modify_stop_loss(p.ticket, new_sl)
+                    p.sl = new_sl
+                    self._update_trade_sl(p.ticket, new_sl)
+                except Exception:
+                    logger.exception("failed to trail stop for %s", p.ticket)
+        return open_positions
+
+    def _broadcast_structural(self, account, open_positions, setup, decision) -> None:
+        for p in open_positions:
+            self._last_known_profit[p.ticket] = p.profit
+        if not self.on_update:
+            return
+        pending = None
+        if self._pending_setup is not None:
+            s = self._pending_setup
+            pending = {
+                "side": s.signal.value,
+                "entry": round(s.entry, 2),
+                "sl": round(s.sl, 2),
+                "tp": round(s.tp, 2),
+                "rr": round(s.rr, 2),
+            }
+        self.on_update(
+            {
+                "type": "tick",
+                "balance": account.balance,
+                "equity": account.equity,
+                "open_positions": [
+                    {
+                        "ticket": p.ticket,
+                        "symbol": p.symbol,
+                        "side": p.side.value,
+                        "volume": p.volume,
+                        "open_price": p.open_price,
+                        "profit": p.profit,
+                    }
+                    for p in open_positions
+                ],
+                "signal": setup.signal.value if setup else "NONE",
+                "signal_reason": setup.reason if setup else "scanning",
+                "risk_allowed": decision.allowed,
+                "risk_reason": decision.reason,
+                "setup_stage": self._last_setup_stage,
+                "pending_setup": pending,
+            }
+        )
 
     def _bracket_for(self, price: float, side: OrderSide, symbol_info) -> tuple[float, float]:
         """SL/TP prices for an order at `price`.
@@ -426,6 +640,7 @@ class TradingEngine:
                     record.close_time = datetime.now(timezone.utc)
                     record.profit = profit
                 self._last_known_profit.pop(ticket, None)
+                self._initial_risk.pop(ticket, None)
             session.commit()
 
     def _log_new_trade(self, position: Position) -> None:
@@ -489,4 +704,5 @@ class TradingEngine:
             "last_error": self._last_error,
             "basket_mode": self.basket_mode,
             "last_basket_event": self._last_basket_event,
+            "setup_stage": self._last_setup_stage,
         }

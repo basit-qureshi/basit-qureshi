@@ -60,6 +60,20 @@ def run_backtest(
         symbol=symbol, pip_size=pip_size, pip_value_per_lot=10.0, min_volume=0.01, volume_step=0.01
     )
 
+    if getattr(strategy, "is_structural", False):
+        return _run_smc_backtest(
+            df=df,
+            symbol=symbol,
+            strategy=strategy,
+            risk_manager=risk_manager,
+            symbol_info=symbol_info,
+            pip_size=pip_size,
+            starting_balance=starting_balance,
+            period=period,
+            interval=interval,
+            spread_points=spread_points,
+        )
+
     if basket_mode:
         return _run_basket_backtest(
             df=df,
@@ -190,6 +204,145 @@ def _summarize(
         "equity_curve": equity_curve,
         "trades": trades,
     }
+
+
+def _resample(df: pd.DataFrame, minutes: int) -> pd.DataFrame:
+    agg = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+    return df.resample(f"{minutes}min").agg(agg).dropna()
+
+
+def _run_smc_backtest(
+    df: pd.DataFrame,
+    symbol: str,
+    strategy,
+    risk_manager: RiskManager,
+    symbol_info: SymbolInfo,
+    pip_size: float,
+    starting_balance: float,
+    period: str,
+    interval: str,
+    spread_points: float,
+) -> dict:
+    """Replays the SMC strategy bar by bar, including the parts of it that live
+    in the engine rather than in the strategy: waiting for the entry zone, the
+    market fallback when price never comes back, setup expiry, and the R ladder
+    that trails the stop.
+
+    The higher timeframes are built by resampling the supplied series, so a
+    useful run needs 1-minute data — feeding it 15-minute bars leaves nothing
+    to resample M1 structure from.
+    """
+    m5_full = _resample(df, 5)
+    m15_full = _resample(df, 15)
+    spread = spread_points * pip_size
+
+    balance = starting_balance
+    trades: list[dict] = []
+    equity_curve: list[dict] = []
+    pending = None
+    pending_since = None
+    open_trade = None
+
+    expiry = getattr(strategy, "setup_expiry_minutes", 45)
+    fallback_min_rr = getattr(strategy, "fallback_min_rr", 1.0)
+
+    for i in range(200, len(df)):
+        bar = df.iloc[i]
+        now = df.index[i]
+
+        if open_trade:
+            hit = _first_hit(_bar_path(bar), open_trade["side"], open_trade["sl"], open_trade["tp"])
+            if hit:
+                exit_price = open_trade["sl"] if hit == "GROUP_STOP" else open_trade["tp"]
+                direction = 1 if open_trade["side"] == "BUY" else -1
+                pips = direction * (exit_price - open_trade["entry"]) / pip_size
+                profit = round((pips - spread_points) * open_trade["volume"] * 10.0, 2)
+                balance = round(balance + profit, 2)
+                trades.append(
+                    {
+                        "side": open_trade["side"],
+                        "volume": open_trade["volume"],
+                        "entry": round(open_trade["entry"], 5),
+                        "exit": round(float(exit_price), 5),
+                        "sl": round(open_trade["initial_sl"], 5),
+                        "tp": round(open_trade["tp"], 5),
+                        "profit": profit,
+                        "result": "SL" if hit == "GROUP_STOP" else "TP",
+                        "entered": open_trade["entered"],
+                        "open_time": str(df.index[open_trade["open_index"]]),
+                        "close_time": str(now),
+                    }
+                )
+                open_trade = None
+            else:
+                # Trail up the R ladder exactly as the engine does live.
+                new_sl = risk_manager.compute_rr_ladder_sl(
+                    open_trade["side"], open_trade["entry"], open_trade["risk"],
+                    open_trade["sl"], float(bar["close"]), 0.0,
+                )
+                if new_sl is not None:
+                    open_trade["sl"] = new_sl
+
+        if open_trade is None and pending is None:
+            k15 = m15_full.index.searchsorted(now, side="right")
+            k5 = m5_full.index.searchsorted(now, side="right")
+            m15 = m15_full.iloc[max(0, k15 - 200) : k15]
+            m5 = m5_full.iloc[max(0, k5 - 200) : k5]
+            m1 = df.iloc[max(0, i - 199) : i + 1]
+            setup = strategy.generate_setup(m15, m5, m1, float(bar["close"]), pip_size, spread)
+            if setup.signal != Signal.NONE:
+                pending, pending_since = setup, now
+
+        elif open_trade is None and pending is not None:
+            is_buy = pending.signal == Signal.BUY
+            stale = expiry and (now - pending_since).total_seconds() / 60 >= expiry
+            broken = bar["low"] < pending.sl if is_buy else bar["high"] > pending.sl
+            tapped = bar["low"] <= pending.entry if is_buy else bar["high"] >= pending.entry
+            ran_away = bar["high"] >= pending.fallback_price if is_buy else bar["low"] <= pending.fallback_price
+
+            entry_price, entered = None, None
+            if tapped:
+                entry_price, entered = pending.entry, "tap"
+            elif ran_away:
+                price = pending.fallback_price
+                risk_left = abs(price - pending.sl)
+                rr_left = abs(pending.tp - price) / risk_left if risk_left > 0 else 0
+                if rr_left >= fallback_min_rr:
+                    entry_price, entered = price, "fallback"
+
+            if entry_price is not None:
+                risk = abs(entry_price - pending.sl)
+                stop_pips = risk / pip_size
+                volume = risk_manager.calculate_position_size(balance, symbol_info, stop_pips)
+                open_trade = {
+                    "side": pending.signal.value, "entry": float(entry_price),
+                    "sl": float(pending.sl), "initial_sl": float(pending.sl),
+                    "tp": float(pending.tp), "risk": risk, "volume": volume,
+                    "open_index": i, "entered": entered,
+                }
+                pending = pending_since = None
+            elif stale or broken:
+                pending = pending_since = None
+
+        floating = 0.0
+        if open_trade:
+            direction = 1 if open_trade["side"] == "BUY" else -1
+            floating = (
+                direction * (float(bar["close"]) - open_trade["entry"]) / pip_size - spread_points
+            ) * open_trade["volume"] * 10.0
+        equity_curve.append({"time": str(now), "equity": round(balance + floating, 2)})
+
+    result = _summarize(symbol, period, interval, starting_balance, balance, trades, equity_curve)
+    # How the entries were won matters when judging the fallback rule: tap
+    # entries are the planned ones, fallback entries are the trades that would
+    # simply have been missed before.
+    taps = [t for t in trades if t.get("entered") == "tap"]
+    fallbacks = [t for t in trades if t.get("entered") == "fallback"]
+    result["entry_breakdown"] = {
+        "tap": {"count": len(taps), "profit": round(sum(t["profit"] for t in taps), 2)},
+        "fallback": {"count": len(fallbacks), "profit": round(sum(t["profit"] for t in fallbacks), 2)},
+    }
+    return result
 
 
 def _bar_path(bar) -> list[float]:

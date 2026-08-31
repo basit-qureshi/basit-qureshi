@@ -31,6 +31,11 @@ class SettingsUpdate(BaseModel):
     basket_add_gap_points: float | None = None
     basket_target_usd: float | None = None
     basket_max_loss_usd: float | None = None
+    smc_sl_buffer_points: float | None = None
+    smc_min_rr: float | None = None
+    smc_fallback_points: float | None = None
+    smc_fallback_min_rr: float | None = None
+    smc_setup_expiry_minutes: int | None = None
 
 
 class ModeUpdate(BaseModel):
@@ -45,14 +50,14 @@ class TestOrderRequest(BaseModel):
 
 
 class BacktestRequest(BaseModel):
-    symbol: str = "EURUSD"
-    period: str = "60d"
-    interval: str = "15m"
+    symbol: str = "XAUUSD"
+    period: str = "7d"
+    interval: str = "1m"
     starting_balance: float = 10000.0
     risk_percent: float = 1.0
     stop_loss_pips: float = 100
     take_profit_pips: float = 200
-    strategy: str = "retest_rejection"
+    strategy: str = "smc"
     sensitivity: str = "balanced"
     fixed_lot_size: float = 0
     basket_mode: bool = False

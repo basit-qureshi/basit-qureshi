@@ -15,6 +15,7 @@ from app.strategy.ema_rsi_strategy import EmaRsiStrategy
 from app.strategy.momentum_scalp import MomentumScalpStrategy
 from app.strategy.retest_rejection import RetestRejectionStrategy
 from app.strategy.scalp_breakout import ScalpBreakoutStrategy
+from app.strategy.smc_strategy import SmcStrategy
 
 _SETTINGS_FILE = Path(__file__).resolve().parent.parent / "runtime_settings.json"
 
@@ -52,6 +53,11 @@ class BotManager:
             "basket_add_gap_points": settings.basket_add_gap_points,
             "basket_target_usd": settings.basket_target_usd,
             "basket_max_loss_usd": settings.basket_max_loss_usd,
+            "smc_sl_buffer_points": settings.smc_sl_buffer_points,
+            "smc_min_rr": settings.smc_min_rr,
+            "smc_fallback_points": settings.smc_fallback_points,
+            "smc_fallback_min_rr": settings.smc_fallback_min_rr,
+            "smc_setup_expiry_minutes": settings.smc_setup_expiry_minutes,
             "mode": settings.account_type,
         }
         self._load_persisted_settings()
@@ -78,7 +84,15 @@ class BotManager:
 
     def _build_engine(self) -> TradingEngine:
         s = self.settings
-        if s["strategy"] == "momentum_scalp":
+        if s["strategy"] == "smc":
+            strategy = SmcStrategy.from_sensitivity(
+                s["sensitivity"],
+                sl_buffer_points=s["smc_sl_buffer_points"],
+                min_rr=s["smc_min_rr"],
+                fallback_points=s["smc_fallback_points"],
+                fallback_min_rr=s["smc_fallback_min_rr"],
+            )
+        elif s["strategy"] == "momentum_scalp":
             strategy = MomentumScalpStrategy.from_sensitivity(
                 s["sensitivity"], s["trend_filter_timeframe"]
             )
@@ -120,6 +134,7 @@ class BotManager:
             basket_add_gap_points=s["basket_add_gap_points"],
             basket_target_usd=s["basket_target_usd"],
             basket_max_loss_usd=s["basket_max_loss_usd"],
+            setup_expiry_minutes=s["smc_setup_expiry_minutes"],
         )
 
     def _on_update(self, payload: dict) -> None:

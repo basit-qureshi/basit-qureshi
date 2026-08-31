@@ -19,6 +19,7 @@ export default function App() {
   const [liveOpenPositions, setLiveOpenPositions] = useState([]);
   const [lastSignal, setLastSignal] = useState(null);
   const [basket, setBasket] = useState(null);
+  const [setup, setSetup] = useState(null);
   const [busy, setBusy] = useState(false);
   const [globalError, setGlobalError] = useState(null);
   const [tab, setTab] = useState("dashboard");
@@ -94,6 +95,7 @@ export default function App() {
           risk_reason: payload.risk_reason,
         });
         setBasket(payload.basket || null);
+        setSetup({ stage: payload.setup_stage, pending: payload.pending_setup || null });
       }
     });
     return () => {
@@ -187,6 +189,25 @@ export default function App() {
               <p className={lastSignal.risk_allowed ? "tone-green" : "tone-red"}>
                 Risk check: {lastSignal.risk_allowed ? "allowed" : "blocked"} ({lastSignal.risk_reason})
               </p>
+            </div>
+          )}
+
+          {setup && (
+            <div className="panel signal-panel">
+              <h3>SMC Setup</h3>
+              {setup.pending ? (
+                <>
+                  <p>
+                    Planned <b>{setup.pending.side}</b> — waiting for price to reach{" "}
+                    <b>{setup.pending.entry}</b>
+                  </p>
+                  <p className="muted">
+                    Stop {setup.pending.sl} · Target {setup.pending.tp} · Reward:risk 1:{setup.pending.rr}
+                  </p>
+                </>
+              ) : (
+                <p className="muted">{setup.stage || "scanning structure"}</p>
+              )}
             </div>
           )}
 

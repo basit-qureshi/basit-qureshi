@@ -134,6 +134,46 @@ class RiskManager:
             return entry_price - distance_sl, entry_price + distance_tp
         return entry_price + distance_sl, entry_price - distance_tp
 
+    def compute_rr_ladder_sl(
+        self,
+        side: str,
+        entry_price: float,
+        initial_risk: float,
+        current_sl: float,
+        current_price: float,
+        min_stop_distance: float = 0.0,
+    ) -> float | None:
+        """Trails the stop up the reward:risk ladder: at 1R the stop goes to
+        entry, at 2R it goes to 1R, at 3R to 2R, and so on.
+
+        `initial_risk` is the distance from entry to the ORIGINAL stop, so the
+        ladder keeps measuring against the risk actually taken rather than
+        against the stop as it moves. Returns None when nothing should change.
+        """
+        if initial_risk <= 0:
+            return None
+
+        if side == "BUY":
+            profit_r = (current_price - entry_price) / initial_risk
+        else:
+            profit_r = (entry_price - current_price) / initial_risk
+
+        if profit_r < 1.0 - 1e-9:  # tolerate float rounding exactly at 1R
+            return None
+
+        # 1R locks nothing (breakeven), 2R locks 1R, 3R locks 2R...
+        locked_r = int(profit_r) - 1
+
+        if side == "BUY":
+            candidate = entry_price + locked_r * initial_risk
+            if min_stop_distance:
+                candidate = min(candidate, current_price - min_stop_distance)
+            return candidate if candidate > current_sl else None
+        candidate = entry_price - locked_r * initial_risk
+        if min_stop_distance:
+            candidate = max(candidate, current_price + min_stop_distance)
+        return candidate if candidate < current_sl else None
+
     def compute_trailing_sl(
         self,
         side: str,

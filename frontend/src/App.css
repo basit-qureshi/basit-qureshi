@@ -236,17 +236,21 @@
   height: 38px;
 }
 
-/* The basket-mode toggle heads its own group of fields, so it gets a full row
-   instead of being squeezed into a column next to a number input. */
+/* Section headings inside the settings grid: full row, so the fields under them
+   read as a group rather than as one long undifferentiated list. */
 .settings-form .settings-span {
   grid-column: 1 / -1;
   flex-direction: row;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
-  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
   border-top: 1px solid var(--border);
   padding-top: 14px;
+  margin-top: 4px;
 }
 
 .settings-form .settings-span input {

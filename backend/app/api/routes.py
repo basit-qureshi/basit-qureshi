@@ -14,6 +14,7 @@ from app.strategy.indicators import ema
 from app.strategy.momentum_scalp import MomentumScalpStrategy
 from app.strategy.retest_rejection import RetestRejectionStrategy
 from app.strategy.scalp_breakout import ScalpBreakoutStrategy
+from app.strategy.smc_strategy import SmcStrategy
 
 router = APIRouter(prefix="/api")
 
@@ -226,7 +227,9 @@ def test_order(body: TestOrderRequest):
 
 @router.post("/backtest")
 def backtest(body: BacktestRequest):
-    if body.strategy == "momentum_scalp":
+    if body.strategy == "smc":
+        strategy = SmcStrategy.from_sensitivity(body.sensitivity)
+    elif body.strategy == "momentum_scalp":
         strategy = MomentumScalpStrategy.from_sensitivity(body.sensitivity)
     elif body.strategy == "retest_rejection":
         strategy = RetestRejectionStrategy.from_sensitivity(body.sensitivity)
