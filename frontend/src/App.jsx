@@ -180,7 +180,7 @@ export default function App() {
 
           <ManualTestPanel mode={status?.mode} onOrderPlaced={refresh} />
 
-          {lastSignal && (
+          {!status?.structural && lastSignal && (
             <div className="panel signal-panel">
               <h3>Last Strategy Check</h3>
               <p>
@@ -192,7 +192,7 @@ export default function App() {
             </div>
           )}
 
-          {setup && (
+          {status?.structural && setup && (
             <div className="panel signal-panel">
               <h3>SMC Setup</h3>
               {setup.pending ? (

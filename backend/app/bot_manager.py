@@ -19,6 +19,13 @@ from app.strategy.smc_strategy import SmcStrategy
 
 _SETTINGS_FILE = Path(__file__).resolve().parent.parent / "runtime_settings.json"
 
+# Strategies the dashboard still offers. Anything else is retired: it exists in
+# the code but can no longer be chosen, so a saved setting naming one has to be
+# migrated rather than honoured. Silently running a strategy the user cannot see
+# in the UI is worse than any wrong strategy — the dashboard says one thing
+# while the account does another.
+SELECTABLE_STRATEGIES = frozenset({"smc"})
+
 
 class BotManager:
     """Owns the single broker connection + trading engine instance for the app,
@@ -76,7 +83,23 @@ class BotManager:
             saved = json.loads(_SETTINGS_FILE.read_text())
             self.settings.update({k: v for k, v in saved.items() if k in self.settings})
         except Exception:
-            pass
+            return
+        self._migrate_retired_strategy()
+
+    def _migrate_retired_strategy(self) -> None:
+        """A settings file written before a strategy was retired still names it.
+
+        Left alone, the dashboard shows the only strategy it offers while the
+        engine quietly runs the old one — the trades then carry the old
+        strategy's stop and target, which is very hard to diagnose from the
+        outside. The saved value is therefore replaced with the configured one.
+        """
+        current = self.settings.get("strategy")
+        if current in SELECTABLE_STRATEGIES:
+            return
+        replacement = settings.strategy if settings.strategy in SELECTABLE_STRATEGIES else "smc"
+        self.settings["strategy"] = replacement
+        self._save_persisted_settings()
 
     def _save_persisted_settings(self) -> None:
         try:
@@ -158,6 +181,10 @@ class BotManager:
         if self.engine.running:
             raise RuntimeError("Stop the bot before changing settings")
         self.settings.update(new_settings)
+        # A stale strategy can also arrive from the dashboard: a <select> whose
+        # stored value is not among its options displays the first one while
+        # still submitting the old value.
+        self._migrate_retired_strategy()
         self._save_persisted_settings()
         self.engine = self._build_engine()
 

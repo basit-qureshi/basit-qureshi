@@ -14,6 +14,7 @@ const SYMBOLS = [
   "USDJPYm",
 ];
 const TIMEFRAMES = ["M1", "M5", "M15", "M30", "H1", "H4", "D1"];
+const STRATEGIES = ["smc"];
 
 export default function SettingsPanel({ settings, running, onSave, saving }) {
   const [form, setForm] = useState(settings || {});
@@ -23,7 +24,13 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
   // object each time. Only sync it into the form while the user has no unsaved
   // edits — otherwise their typing gets wiped mid-edit on every poll.
   useEffect(() => {
-    if (settings && !dirty) setForm(settings);
+    if (!settings || dirty) return;
+    // A <select> whose stored value is not one of its options displays the
+    // first option while still submitting the old value, so a setting left
+    // over from a retired strategy would silently save itself back. Pin it to
+    // what the dropdown can actually represent.
+    const strategy = STRATEGIES.includes(settings.strategy) ? settings.strategy : STRATEGIES[0];
+    setForm({ ...settings, strategy });
   }, [settings, dirty]);
 
   if (!form) return null;

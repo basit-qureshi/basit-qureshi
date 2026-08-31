@@ -7,7 +7,13 @@ export default function StatusBar({ status, onStart, onStop, onModeChange, busy 
 
   if (!status) return null;
 
-  const { running, mode, connected, symbol, timeframe, last_error } = status;
+  const { running, mode, connected, symbol, timeframe, last_error, strategy_name } = status;
+
+  // Named by the engine from the strategy object it is actually holding, not
+  // from the settings dict — so a saved setting that quietly disagrees with the
+  // dashboard shows up here instead of only in the shape of the trades.
+  const STRATEGY_LABELS = { SmcStrategy: "SMC" };
+  const strategyLabel = STRATEGY_LABELS[strategy_name] || strategy_name;
 
   function handleModeToggle() {
     const nextMode = mode === "demo" ? "real" : "demo";
@@ -36,6 +42,12 @@ export default function StatusBar({ status, onStart, onStop, onModeChange, busy 
           {symbol} · {timeframe}
         </span>
         <span className="sep">|</span>
+        {strategyLabel && (
+          <>
+            <span>{strategyLabel}</span>
+            <span className="sep">|</span>
+          </>
+        )}
         <span className={`badge ${mode === "real" ? "badge-real" : "badge-demo"}`}>
           {mode === "real" ? "REAL MONEY" : "DEMO"}
         </span>

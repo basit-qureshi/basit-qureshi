@@ -705,4 +705,8 @@ class TradingEngine:
             "basket_mode": self.basket_mode,
             "last_basket_event": self._last_basket_event,
             "setup_stage": self._last_setup_stage,
+            # Named from the live object, not from the settings dict, so the
+            # dashboard reports the strategy that is actually running.
+            "strategy_name": type(self.strategy).__name__,
+            "structural": bool(getattr(self.strategy, "is_structural", False)),
         }
