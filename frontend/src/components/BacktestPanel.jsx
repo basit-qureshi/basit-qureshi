@@ -164,6 +164,28 @@ export default function BacktestPanel({ onRun }) {
             is the signature of a system that pays out small and often and takes it all back at once — that shape can
             look excellent for weeks before it doesn't.
           </p>
+          {result.stage_breakdown?.length > 0 && (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Where the strategy stopped</th>
+                    <th>Checks</th>
+                    <th>Share</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {result.stage_breakdown.map((row) => (
+                    <tr key={row.stage}>
+                      <td>{row.stage}</td>
+                      <td>{row.count}</td>
+                      <td>{row.percent}%</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
           {result.setup_funnel && (
             <p className="muted">
               <b>Setups:</b> {result.setup_funnel.armed} found · {result.setup_funnel.filled} filled ·{" "}

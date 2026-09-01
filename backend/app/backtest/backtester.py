@@ -252,6 +252,7 @@ def _run_smc_backtest(
     # finds structure but never fills is a different problem from one that finds
     # no structure at all.
     armed = expired = broken = 0
+    stage_counts: dict[str, int] = {}
 
     for i in range(200, len(df)):
         bar = df.iloc[i]
@@ -297,6 +298,7 @@ def _run_smc_backtest(
             m5 = m5_full.iloc[max(0, k5 - 200) : k5]
             m1 = df.iloc[max(0, i - 199) : i + 1]
             setup = strategy.generate_setup(m15, m5, m1, float(bar["close"]), pip_size, spread)
+            stage_counts[setup.stage] = stage_counts.get(setup.stage, 0) + 1
             if setup.signal != Signal.NONE:
                 pending, pending_since = setup, now
                 armed += 1
@@ -358,6 +360,15 @@ def _run_smc_backtest(
         "expired": expired,
         "invalidated": broken,
     }
+    # Which gate the strategy stopped at, and how often. When a run produces
+    # almost no setups this is the only thing that says which filter to reach
+    # for — the trade count alone cannot tell "no structure" from "structure
+    # found but never reached".
+    checks = sum(stage_counts.values()) or 1
+    result["stage_breakdown"] = [
+        {"stage": stage, "count": count, "percent": round(count / checks * 100, 1)}
+        for stage, count in sorted(stage_counts.items(), key=lambda kv: -kv[1])
+    ]
     return result
 
 

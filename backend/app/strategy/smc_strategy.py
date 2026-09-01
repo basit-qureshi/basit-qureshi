@@ -213,6 +213,23 @@ class SmcStrategy:
         self.ema_slow_period = 21
         self.rsi_period = 14
 
+    def _dealing_range(self, m15: pd.DataFrame, break_bar: int, direction: str) -> tuple[float, float]:
+        """The leg the BOS belongs to: its origin swing, and the extreme reached
+        after the break. Falls back to the lookback window when no swing formed
+        before the break — early in the series there may not be one yet."""
+        fallback_start = max(0, break_bar - self.ob_lookback)
+        if direction == "bullish":
+            origins = [i for i in _swing_low_indices(m15, self.swing_n) if i < break_bar]
+            low = float(m15["low"].iloc[origins[-1]]) if origins else float(
+                m15["low"].iloc[fallback_start : break_bar + 1].min()
+            )
+            return low, float(m15["high"].iloc[break_bar:].max())
+        origins = [i for i in _swing_high_indices(m15, self.swing_n) if i < break_bar]
+        high = float(m15["high"].iloc[origins[-1]]) if origins else float(
+            m15["high"].iloc[fallback_start : break_bar + 1].max()
+        )
+        return float(m15["low"].iloc[break_bar:].min()), high
+
     def generate_setup(
         self,
         m15: pd.DataFrame,
@@ -239,14 +256,12 @@ class SmcStrategy:
             )
         _, ob_low, ob_high = ob
 
-        # Premium/discount: the order block has to sit in the half of the range
-        # that gives the trade room, not against the move it is supposed to join.
-        if direction == "bullish":
-            range_low = float(m15["low"].iloc[max(0, break_bar - self.ob_lookback) : break_bar + 1].min())
-            range_high = float(m15["high"].iloc[break_bar:].max())
-        else:
-            range_high = float(m15["high"].iloc[max(0, break_bar - self.ob_lookback) : break_bar + 1].max())
-            range_low = float(m15["low"].iloc[break_bar:].min())
+        # Premium/discount is measured across the leg that produced the BOS:
+        # from the swing the move started at, to the extreme it reached after
+        # breaking structure. Measuring from the lowest low in an arbitrary
+        # lookback instead drags the midpoint far away from the actual leg and
+        # makes order blocks in a perfectly good discount read as premium.
+        range_low, range_high = self._dealing_range(m15, break_bar, direction)
         equilibrium = (range_low + range_high) / 2
         ob_mid = (ob_low + ob_high) / 2
         in_right_half = ob_mid <= equilibrium if direction == "bullish" else ob_mid >= equilibrium
