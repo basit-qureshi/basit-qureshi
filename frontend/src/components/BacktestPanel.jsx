@@ -1,19 +1,21 @@
 import { useState } from "react";
 import EquityChart from "./EquityChart";
 
-const SYMBOLS = ["XAUUSD", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCHF", "USDCAD"];
-
 export default function BacktestPanel({ onRun }) {
   const [form, setForm] = useState({
     symbol: "XAUUSD",
     period: "7d",
     interval: "1m",
     starting_balance: 10000,
-    risk_percent: 1,
-    strategy: "smc",
-    sensitivity: "balanced",
+    lot_size: 0.01,
+    buy_stop_levels: 10,
+    sell_stop_levels: 10,
+    grid_distance: 0.3,
+    basket_take_profit_usd: 10,
+    basket_stop_loss_usd: 0,
     spread_points: 24,
-    fixed_lot_size: 0,
+    max_daily_loss_usd: 100,
+    max_equity_drawdown_percent: 30,
   });
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
@@ -29,11 +31,19 @@ export default function BacktestPanel({ onRun }) {
     setError(null);
     try {
       const data = await onRun({
-        ...form,
+        symbol: form.symbol,
+        period: form.period,
+        interval: form.interval,
         starting_balance: Number(form.starting_balance),
-        risk_percent: Number(form.risk_percent),
+        lot_size: Number(form.lot_size),
+        buy_stop_levels: Number(form.buy_stop_levels),
+        sell_stop_levels: Number(form.sell_stop_levels),
+        grid_distance: Number(form.grid_distance),
+        basket_take_profit_usd: Number(form.basket_take_profit_usd),
+        basket_stop_loss_usd: Number(form.basket_stop_loss_usd),
         spread_points: Number(form.spread_points),
-        fixed_lot_size: Number(form.fixed_lot_size),
+        max_daily_loss_usd: Number(form.max_daily_loss_usd),
+        max_equity_drawdown_percent: Number(form.max_equity_drawdown_percent),
       });
       setResult(data);
     } catch (err) {
@@ -46,30 +56,16 @@ export default function BacktestPanel({ onRun }) {
   return (
     <div className="panel">
       <h3>Backtest (historical data)</h3>
+      <p className="muted">
+        Replays the same grid cycle on past candles — build, fill, close the basket at the target, rebuild — so the
+        strategy can be judged before money is on it. Use the <b>1 min</b> interval: the grid is an M1 strategy, and
+        a coarser bar hides the order in which levels were reached. <b>Spread</b> is charged on every fill; leaving
+        it at 0 makes any grid result fiction, because the grid pays it more often than anything else does.
+      </p>
       <form className="settings-form" onSubmit={handleRun}>
         <label>
           Symbol
-          <select value={form.symbol} onChange={(e) => update("symbol", e.target.value)}>
-            {SYMBOLS.map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Strategy
-          <select value={form.strategy} onChange={(e) => update("strategy", e.target.value)}>
-            <option value="smc">Smart Money Concepts (M15 → M1 → M5)</option>
-          </select>
-        </label>
-        <label>
-          Sensitivity
-          <select value={form.sensitivity} onChange={(e) => update("sensitivity", e.target.value)}>
-            <option value="aggressive">Aggressive</option>
-            <option value="balanced">Balanced</option>
-            <option value="conservative">Conservative</option>
-          </select>
+          <input value={form.symbol} onChange={(e) => update("symbol", e.target.value)} />
         </label>
         <label>
           Period
@@ -77,47 +73,94 @@ export default function BacktestPanel({ onRun }) {
             <option value="7d">7 days</option>
             <option value="30d">30 days</option>
             <option value="60d">60 days</option>
-            <option value="1y">1 year</option>
           </select>
         </label>
         <label>
           Interval
           <select value={form.interval} onChange={(e) => update("interval", e.target.value)}>
             <option value="1m">1 min (7 days max)</option>
-            <option value="5m">5 min (too coarse for SMC)</option>
+            <option value="5m">5 min (hides fill order)</option>
           </select>
         </label>
         <label>
           Starting Balance
-          <input type="number" value={form.starting_balance} onChange={(e) => update("starting_balance", e.target.value)} />
+          <input
+            type="number"
+            value={form.starting_balance}
+            onChange={(e) => update("starting_balance", e.target.value)}
+          />
         </label>
         <label>
-          Risk %
-          <input type="number" step="0.1" value={form.risk_percent} onChange={(e) => update("risk_percent", e.target.value)} />
+          Lot size
+          <input type="number" step="0.01" value={form.lot_size} onChange={(e) => update("lot_size", e.target.value)} />
         </label>
         <label>
-          Spread (points, charged per entry)
-          <input type="number" value={form.spread_points} onChange={(e) => update("spread_points", e.target.value)} />
+          Buy stop levels
+          <input
+            type="number"
+            value={form.buy_stop_levels}
+            onChange={(e) => update("buy_stop_levels", e.target.value)}
+          />
         </label>
         <label>
-          Fixed Lot (0 = from risk %)
+          Sell stop levels
+          <input
+            type="number"
+            value={form.sell_stop_levels}
+            onChange={(e) => update("sell_stop_levels", e.target.value)}
+          />
+        </label>
+        <label>
+          Grid distance
           <input
             type="number"
             step="0.01"
-            min="0"
-            value={form.fixed_lot_size}
-            onChange={(e) => update("fixed_lot_size", e.target.value)}
+            value={form.grid_distance}
+            onChange={(e) => update("grid_distance", e.target.value)}
+          />
+        </label>
+        <label>
+          Basket take profit ($)
+          <input
+            type="number"
+            step="0.5"
+            value={form.basket_take_profit_usd}
+            onChange={(e) => update("basket_take_profit_usd", e.target.value)}
+          />
+        </label>
+        <label>
+          Basket stop loss ($, 0 = off)
+          <input
+            type="number"
+            step="1"
+            value={form.basket_stop_loss_usd}
+            onChange={(e) => update("basket_stop_loss_usd", e.target.value)}
+          />
+        </label>
+        <label>
+          Spread (points, per fill)
+          <input type="number" value={form.spread_points} onChange={(e) => update("spread_points", e.target.value)} />
+        </label>
+        <label>
+          Max daily loss ($)
+          <input
+            type="number"
+            value={form.max_daily_loss_usd}
+            onChange={(e) => update("max_daily_loss_usd", e.target.value)}
+          />
+        </label>
+        <label>
+          Max equity drawdown (%)
+          <input
+            type="number"
+            value={form.max_equity_drawdown_percent}
+            onChange={(e) => update("max_equity_drawdown_percent", e.target.value)}
           />
         </label>
         <button className="btn btn-primary" type="submit" disabled={loading}>
           {loading ? "Running..." : "Run Backtest"}
         </button>
       </form>
-      <p className="muted">
-        SMC reads M15 and M5 structure by resampling the data you pick here, so use the <b>1 min</b> interval —
-        anything coarser leaves nothing to build M1 structure from. Spread is charged on every entry; leaving it at 0
-        makes any result look better than it can be. On gold it is normally 20–30 points.
-      </p>
 
       {error && <p className="error-text">⚠ {error}</p>}
 
@@ -125,7 +168,7 @@ export default function BacktestPanel({ onRun }) {
         <div className="backtest-result">
           <div className="stat-grid">
             <div className="card">
-              <div className="card-label">Total Trades</div>
+              <div className="card-label">Baskets</div>
               <div className="card-value">{result.total_trades}</div>
             </div>
             <div className="card">
@@ -151,59 +194,21 @@ export default function BacktestPanel({ onRun }) {
               <div className="card-value">${result.ending_balance}</div>
             </div>
             <div className="card">
-              <div className="card-label">Worst Single Trade</div>
+              <div className="card-label">Worst Basket</div>
               <div className="card-value tone-red">${result.worst_trade ?? "—"}</div>
             </div>
             <div className="card">
-              <div className="card-label">Best Single Trade</div>
-              <div className="card-value tone-green">${result.best_trade ?? "—"}</div>
+              <div className="card-label">Most Positions At Once</div>
+              <div className="card-value">{result.max_positions_open ?? "—"}</div>
             </div>
           </div>
           <p className="muted">
-            Read <b>Worst Single Trade</b> next to Win Rate, not on its own. A high win rate with one very large loss
-            is the signature of a system that pays out small and often and takes it all back at once — that shape can
-            look excellent for weeks before it doesn't.
+            Read <b>Worst Basket</b> and <b>Max Drawdown</b> first, before Win Rate. This strategy closes at a fixed
+            profit and has no fixed loss, so a high win rate is built into its design and tells you nothing on its
+            own — every grid produces one. The question is what the losing baskets cost when they come.{" "}
+            <b>Most Positions At Once</b> is how much exposure the grid actually built up: multiply it by the lot
+            size to see the position you were really carrying.
           </p>
-          {result.stage_breakdown?.length > 0 && (
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Where the strategy stopped</th>
-                    <th>Checks</th>
-                    <th>Share</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {result.stage_breakdown.map((row) => (
-                    <tr key={row.stage}>
-                      <td>{row.stage}</td>
-                      <td>{row.count}</td>
-                      <td>{row.percent}%</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-          {result.setup_funnel && (
-            <p className="muted">
-              <b>Setups:</b> {result.setup_funnel.armed} found · {result.setup_funnel.filled} filled ·{" "}
-              {result.setup_funnel.expired} expired unfilled · {result.setup_funnel.invalidated} invalidated when
-              price broke the zone. If very few are <i>found</i>, the structure filters are too tight for this data —
-              loosen Sensitivity or lower Min RR. If many are found but few <i>fill</i>, the entries are the problem —
-              lower Fallback distance so the bot takes more of them at market.
-            </p>
-          )}
-          {result.entry_breakdown && (
-            <p className="muted">
-              <b>Entries:</b> {result.entry_breakdown.tap.count} on a zone tap (${result.entry_breakdown.tap.profit}),{" "}
-              {result.entry_breakdown.fallback.count} taken at market after price ran away without tapping ($
-              {result.entry_breakdown.fallback.profit}). The second number tells you whether the fallback rule is
-              earning its place — if it is consistently negative, raise <i>Fallback min RR</i> or turn it off by
-              setting <i>Fallback distance</i> very high.
-            </p>
-          )}
           <EquityChart data={result.equity_curve} title="Backtest Equity Curve" />
         </div>
       )}

@@ -8,6 +8,8 @@ from app.brokers.base import (
     AccountInfo,
     BrokerAdapter,
     OrderSide,
+    PendingOrder,
+    PendingType,
     Position,
     SymbolInfo,
 )
@@ -148,13 +150,15 @@ class MT5Broker(BrokerAdapter):
         return (tick.bid + tick.ask) / 2
 
     @_synchronized
-    def get_open_positions(self, symbol: str | None = None) -> list[Position]:
+    def get_open_positions(self, symbol: str | None = None, magic: int | None = None) -> list[Position]:
         mt5 = self._mt5
         raw = mt5.positions_get(symbol=symbol) if symbol else mt5.positions_get()
         if raw is None:
             return []
         result = []
         for p in raw:
+            if magic is not None and p.magic != magic:
+                continue
             side = OrderSide.BUY if p.type == mt5.POSITION_TYPE_BUY else OrderSide.SELL
             result.append(
                 Position(
@@ -167,12 +171,92 @@ class MT5Broker(BrokerAdapter):
                     tp=p.tp,
                     open_time=datetime.fromtimestamp(p.time, tz=timezone.utc).isoformat(),
                     profit=p.profit,
+                    magic=p.magic,
                 )
             )
         return result
 
     @_synchronized
-    def place_order(self, symbol: str, side: OrderSide, volume: float, sl: float, tp: float) -> Position:
+    def place_pending_order(
+        self,
+        symbol: str,
+        order_type: PendingType,
+        volume: float,
+        price: float,
+        comment: str = "",
+        magic: int = 0,
+    ) -> PendingOrder:
+        mt5 = self._mt5
+        self._ensure_symbol_selected(symbol)
+        info = mt5.symbol_info(symbol)
+        if info is None:
+            raise RuntimeError(f"Symbol {symbol} not found on this broker")
+        # A stop order has to rest at a price the broker will accept: rounded to
+        # the symbol's tick, and far enough from the market to clear its minimum
+        # stop distance. Too close and MT5 rejects the whole order with
+        # "Invalid stops" rather than adjusting it.
+        price = round(price, info.digits)
+        mt5_type = mt5.ORDER_TYPE_BUY_STOP if order_type == PendingType.BUY_STOP else mt5.ORDER_TYPE_SELL_STOP
+        request = {
+            "action": mt5.TRADE_ACTION_PENDING,
+            "symbol": symbol,
+            "volume": volume,
+            "type": mt5_type,
+            "price": price,
+            "deviation": 20,
+            "magic": magic,
+            "comment": comment or "grid",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_RETURN,
+        }
+        result = mt5.order_send(request)
+        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+            raise RuntimeError(f"MT5 pending order_send failed at {price}: {result}")
+        return PendingOrder(
+            ticket=str(result.order),
+            symbol=symbol,
+            order_type=order_type,
+            volume=volume,
+            price=price,
+            comment=comment,
+        )
+
+    @_synchronized
+    def get_pending_orders(self, symbol: str | None = None, magic: int | None = None) -> list[PendingOrder]:
+        mt5 = self._mt5
+        raw = mt5.orders_get(symbol=symbol) if symbol else mt5.orders_get()
+        if raw is None:
+            return []
+        types = {mt5.ORDER_TYPE_BUY_STOP: PendingType.BUY_STOP, mt5.ORDER_TYPE_SELL_STOP: PendingType.SELL_STOP}
+        result = []
+        for o in raw:
+            if magic is not None and o.magic != magic:
+                continue
+            if o.type not in types:
+                continue
+            result.append(
+                PendingOrder(
+                    ticket=str(o.ticket),
+                    symbol=o.symbol,
+                    order_type=types[o.type],
+                    volume=o.volume_current,
+                    price=o.price_open,
+                    comment=o.comment,
+                )
+            )
+        return result
+
+    @_synchronized
+    def cancel_pending_order(self, ticket: str) -> None:
+        mt5 = self._mt5
+        result = mt5.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": int(ticket)})
+        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+            raise RuntimeError(f"MT5 cancel order {ticket} failed: {result}")
+
+    @_synchronized
+    def place_order(
+        self, symbol: str, side: OrderSide, volume: float, sl: float, tp: float, magic: int = 990011
+    ) -> Position:
         mt5 = self._mt5
         tick = mt5.symbol_info_tick(symbol)
         price = tick.ask if side == OrderSide.BUY else tick.bid
@@ -186,7 +270,7 @@ class MT5Broker(BrokerAdapter):
             "sl": sl,
             "tp": tp,
             "deviation": 20,
-            "magic": 990011,
+            "magic": magic,
             "comment": "forex-ai-bot",
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": mt5.ORDER_FILLING_IOC,
@@ -204,6 +288,7 @@ class MT5Broker(BrokerAdapter):
             tp=tp,
             open_time=datetime.now(timezone.utc).isoformat(),
             profit=0.0,
+            magic=magic,
         )
 
     @_synchronized

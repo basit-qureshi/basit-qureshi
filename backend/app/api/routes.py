@@ -4,17 +4,11 @@ import pandas as pd
 from fastapi import APIRouter, HTTPException
 
 from app.api.schemas import BacktestRequest, ModeUpdate, SettingsUpdate, StartRequest, TestOrderRequest
-from app.backtest.backtester import run_backtest
+from app.backtest.backtester import run_grid_backtest
 from app.bot_manager import bot_manager
 from app.brokers.base import OrderSide
 from app.db import SessionLocal, TradeRecord
-from app.risk.risk_manager import RiskManager
-from app.strategy.ema_rsi_strategy import EmaRsiStrategy
 from app.strategy.indicators import ema
-from app.strategy.momentum_scalp import MomentumScalpStrategy
-from app.strategy.retest_rejection import RetestRejectionStrategy
-from app.strategy.scalp_breakout import ScalpBreakoutStrategy
-from app.strategy.smc_strategy import SmcStrategy
 
 router = APIRouter(prefix="/api")
 
@@ -127,9 +121,11 @@ def get_candles(count: int = 200):
     if not engine.broker.is_connected():
         engine.broker.connect()
     df = engine.broker.get_candles(engine.symbol, engine.timeframe, count)
+    # The grid uses no indicators. These two lines are drawn purely so the
+    # chart is readable, and nothing in the strategy reads them.
     closes = df["close"]
-    ema_fast = ema(closes, engine.strategy.ema_fast_period)
-    ema_slow = ema(closes, engine.strategy.ema_slow_period)
+    ema_fast = ema(closes, 9)
+    ema_slow = ema(closes, 21)
 
     # Truncating to whole seconds can make two distinct timestamps collide
     # (e.g. a synthetic candle generated a fraction of a second after the
@@ -227,41 +223,21 @@ def test_order(body: TestOrderRequest):
 
 @router.post("/backtest")
 def backtest(body: BacktestRequest):
-    if body.strategy == "smc":
-        strategy = SmcStrategy.from_sensitivity(body.sensitivity)
-    elif body.strategy == "momentum_scalp":
-        strategy = MomentumScalpStrategy.from_sensitivity(body.sensitivity)
-    elif body.strategy == "retest_rejection":
-        strategy = RetestRejectionStrategy.from_sensitivity(body.sensitivity)
-    elif body.strategy == "scalp_breakout":
-        strategy = ScalpBreakoutStrategy()
-    else:
-        strategy = EmaRsiStrategy()
-    risk_manager = RiskManager(
-        risk_percent=body.risk_percent,
-        fixed_lot_size=body.fixed_lot_size,
-        stop_loss_pips=body.stop_loss_pips,
-        take_profit_pips=body.take_profit_pips,
-        max_open_trades=1,
-        max_daily_loss_percent=100,
-    )
     try:
-        result = run_backtest(
+        return run_grid_backtest(
             symbol=body.symbol,
-            strategy=strategy,
-            risk_manager=risk_manager,
-            starting_balance=body.starting_balance,
             period=body.period,
             interval=body.interval,
-            basket_mode=body.basket_mode,
-            basket_max_entries=body.basket_max_entries,
-            basket_add_gap_points=body.basket_add_gap_points,
-            basket_target_usd=body.basket_target_usd,
-            basket_max_loss_usd=body.basket_max_loss_usd,
-            basket_max_bars=body.basket_max_bars,
+            starting_balance=body.starting_balance,
+            lot_size=body.lot_size,
+            buy_stop_levels=body.buy_stop_levels,
+            sell_stop_levels=body.sell_stop_levels,
+            grid_distance=body.grid_distance,
+            basket_take_profit_usd=body.basket_take_profit_usd,
+            basket_stop_loss_usd=body.basket_stop_loss_usd,
             spread_points=body.spread_points,
-            setup_expiry_minutes=body.setup_expiry_minutes,
+            max_daily_loss_usd=body.max_daily_loss_usd,
+            max_equity_drawdown_percent=body.max_equity_drawdown_percent,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    return result

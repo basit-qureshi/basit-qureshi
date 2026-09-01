@@ -1,33 +1,40 @@
+"""Replay of the XAUUSD M1 pending-order grid on historical candles.
+
+The simulation follows the same cycle the live engine does: build a grid, let
+stops fill as price reaches them, add up the basket, close everything at the
+target, rebuild. What it adds on top of the live engine is the ability to run
+years of that in seconds so the strategy can be judged before money is on it.
+
+Two things are modelled carefully because they decide the answer:
+
+- Spread. Every stop order fills half a spread the wrong side of its level, and
+  the position is closed at the other side. On gold that is 24-30 points on a
+  strategy whose whole target is $10, so a run with spread set to 0 is fiction.
+- Intrabar order. A single M1 candle can reach several grid levels and the
+  basket target in the same minute. The bar's assumed path (down-then-up on an
+  up bar, the reverse on a down bar) is walked in order rather than assuming
+  the best or the worst, because on a grid the order of those events is the
+  difference between a winning basket and a losing one.
+"""
+
 import pandas as pd
 import yfinance as yf
 
-from app.brokers.base import SymbolInfo
-from app.risk.risk_manager import RiskManager
-from app.strategy.ema_rsi_strategy import EmaRsiStrategy, Signal
-
 _YF_SYMBOL_MAP = {
+    "XAUUSD": "GC=F",  # Gold futures continuous contract — closest free proxy for spot gold
     "EURUSD": "EURUSD=X",
     "GBPUSD": "GBPUSD=X",
     "USDJPY": "USDJPY=X",
-    "AUDUSD": "AUDUSD=X",
-    "USDCHF": "USDCHF=X",
-    "USDCAD": "USDCAD=X",
-    "XAUUSD": "GC=F",  # Gold futures continuous contract — closest free proxy for spot gold
 }
 
-# Local pip-size table so the backtester has no dependency on a live broker connection.
-_PIP_SIZES = {
-    "EURUSD": 0.0001,
-    "GBPUSD": 0.0001,
-    "USDJPY": 0.01,
-    "AUDUSD": 0.0001,
-    "USDCHF": 0.0001,
-    "USDCAD": 0.0001,
-    "XAUUSD": 0.01,
-}
+# The size of one point, and what one point on one lot is worth. A standard
+# gold lot is 100 ounces and a point is 0.01, so a point is $1.00 per lot — and
+# 0.01 lots, which is all this strategy ever trades, earn a cent per point.
+_POINT = {"XAUUSD": 0.01, "EURUSD": 0.0001, "GBPUSD": 0.0001, "USDJPY": 0.01}
+_VALUE_PER_LOT_PER_POINT = {"XAUUSD": 1.0, "EURUSD": 10.0, "GBPUSD": 10.0, "USDJPY": 10.0}
 
 
-def fetch_history(symbol: str, period: str = "60d", interval: str = "15m") -> pd.DataFrame:
+def fetch_history(symbol: str, period: str = "7d", interval: str = "1m") -> pd.DataFrame:
     yf_symbol = _YF_SYMBOL_MAP.get(symbol, f"{symbol}=X")
     df = yf.download(yf_symbol, period=period, interval=interval, progress=False, auto_adjust=True)
     if df.empty:
@@ -39,151 +46,196 @@ def fetch_history(symbol: str, period: str = "60d", interval: str = "15m") -> pd
     return df[["open", "high", "low", "close", "volume"]]
 
 
-def run_backtest(
-    symbol: str,
-    strategy: EmaRsiStrategy,
-    risk_manager: RiskManager,
+def _bar_path(bar) -> list[float]:
+    """The order prices are assumed to have been visited inside one bar.
+
+    A bar records four numbers; the route between them is a guess. The usual
+    convention is used — an up bar dipped to its low before running to its
+    high, a down bar the reverse.
+    """
+    o, h, l, c = float(bar["open"]), float(bar["high"]), float(bar["low"]), float(bar["close"])
+    return [o, l, h, c] if c >= o else [o, h, l, c]
+
+
+class _Basket:
+    """Positions opened from one grid, and the pending orders still waiting."""
+
+    def __init__(self, reference: float, lot: float, value_per_point: float):
+        self.reference = reference
+        self.lot = lot
+        self.value_per_point = value_per_point
+        self.buy_stops: list[float] = []
+        self.sell_stops: list[float] = []
+        self.positions: list[dict] = []  # {"side", "entry"}
+        self.opened_at = None
+        self.fills = 0
+
+    def profit_at(self, price: float, point: float, spread: float) -> float:
+        """Combined net profit if every position were closed at `price`.
+
+        The closing side of the spread is charged here; the opening side is
+        already in each fill price.
+        """
+        total = 0.0
+        for pos in self.positions:
+            exit_price = price - spread / 2 if pos["side"] == "BUY" else price + spread / 2
+            move = exit_price - pos["entry"] if pos["side"] == "BUY" else pos["entry"] - exit_price
+            total += move / point * self.lot * self.value_per_point
+        return total
+
+    def price_for_profit(self, target: float, point: float, spread: float) -> float | None:
+        """The price at which the basket's combined profit equals `target`.
+
+        Profit is linear in price, so this is solved rather than searched for -
+        which is what lets the basket close AT the target instead of wherever
+        the bar happened to end.
+        """
+        if not self.positions:
+            return None
+        unit = self.lot * self.value_per_point / point  # profit per 1.0 of price move, per position
+        net_units = sum(1 if p["side"] == "BUY" else -1 for p in self.positions) * unit
+        if abs(net_units) < 1e-12:
+            return None  # perfectly hedged: no price reaches the target
+        # profit(price) = net_units * price - constant
+        constant = 0.0
+        for pos in self.positions:
+            if pos["side"] == "BUY":
+                constant += (pos["entry"] + spread / 2) * unit
+            else:
+                constant -= (pos["entry"] - spread / 2) * unit
+        return (target + constant) / net_units
+
+
+def run_grid_backtest(
+    symbol: str = "XAUUSD",
+    period: str = "7d",
+    interval: str = "1m",
     starting_balance: float = 10_000.0,
-    period: str = "60d",
-    interval: str = "15m",
-    basket_mode: bool = False,
-    basket_max_entries: int = 5,
-    basket_add_gap_points: float = 50,
-    basket_target_usd: float = 3.0,
-    basket_max_loss_usd: float = 15.0,
-    basket_max_bars: int = 0,
-    spread_points: float = 0,
-    setup_expiry_minutes: int = 45,
+    lot_size: float = 0.01,
+    buy_stop_levels: int = 10,
+    sell_stop_levels: int = 10,
+    grid_distance: float = 0.30,
+    basket_take_profit_usd: float = 10.0,
+    basket_stop_loss_usd: float = 0.0,
+    spread_points: float = 24.0,
+    max_daily_loss_usd: float = 100.0,
+    max_equity_drawdown_percent: float = 30.0,
+    df: pd.DataFrame | None = None,
 ) -> dict:
-    df = fetch_history(symbol, period, interval)
-    pip_size = _PIP_SIZES.get(symbol, 0.0001)
-    symbol_info = SymbolInfo(
-        symbol=symbol, pip_size=pip_size, pip_value_per_lot=10.0, min_volume=0.01, volume_step=0.01
-    )
-
-    if getattr(strategy, "is_structural", False):
-        return _run_smc_backtest(
-            df=df,
-            symbol=symbol,
-            strategy=strategy,
-            risk_manager=risk_manager,
-            symbol_info=symbol_info,
-            pip_size=pip_size,
-            starting_balance=starting_balance,
-            period=period,
-            interval=interval,
-            spread_points=spread_points,
-            setup_expiry_minutes=setup_expiry_minutes,
-        )
-
-    if basket_mode:
-        return _run_basket_backtest(
-            df=df,
-            symbol=symbol,
-            strategy=strategy,
-            risk_manager=risk_manager,
-            symbol_info=symbol_info,
-            pip_size=pip_size,
-            starting_balance=starting_balance,
-            period=period,
-            interval=interval,
-            max_entries=basket_max_entries,
-            add_gap_points=basket_add_gap_points,
-            target_usd=basket_target_usd,
-            max_loss_usd=basket_max_loss_usd,
-            max_bars=basket_max_bars,
-            spread_points=spread_points,
-        )
+    if df is None:
+        df = fetch_history(symbol, period, interval)
+    point = _POINT.get(symbol, 0.01)
+    value_per_point = _VALUE_PER_LOT_PER_POINT.get(symbol, 1.0)
+    spread = spread_points * point
 
     balance = starting_balance
+    equity_peak = starting_balance
+    baskets: list[dict] = []
     equity_curve: list[dict] = []
-    trades: list[dict] = []
-    open_trade: dict | None = None
+    basket: _Basket | None = None
+    halted_reason: str | None = None
+    day = None
+    day_realized = 0.0
+    max_positions_seen = 0
 
-    # Multi-timeframe strategies build their higher timeframe by resampling, so
-    # they need enough bars to fill that lookback too.
-    higher_tf_bars = 5 * 25 if getattr(strategy, "higher_timeframe", None) else 0
-    min_len = max(strategy.ema_slow_period, strategy.rsi_period, higher_tf_bars) + 2
+    def build(price: float, when) -> _Basket:
+        b = _Basket(price, lot_size, value_per_point)
+        b.buy_stops = [price + (i + 1) * grid_distance for i in range(buy_stop_levels)]
+        b.sell_stops = [price - (i + 1) * grid_distance for i in range(sell_stop_levels)]
+        b.opened_at = when
+        return b
 
-    for i in range(min_len, len(df)):
-        window = df.iloc[: i + 1]
+    def close(b: _Basket, price: float, when, outcome: str) -> None:
+        nonlocal balance, day_realized
+        profit = round(b.profit_at(price, point, spread), 2)
+        balance = round(balance + profit, 2)
+        day_realized += profit
+        baskets.append(
+            {
+                "reference": round(b.reference, 2),
+                "positions": len(b.positions),
+                "fills": b.fills,
+                "profit": profit,
+                "result": outcome,
+                "open_time": str(b.opened_at),
+                "close_time": str(when),
+            }
+        )
+
+    for i in range(len(df)):
         bar = df.iloc[i]
+        when = df.index[i]
 
-        if open_trade:
-            hit_sl = (open_trade["side"] == "BUY" and bar["low"] <= open_trade["sl"]) or (
-                open_trade["side"] == "SELL" and bar["high"] >= open_trade["sl"]
-            )
-            hit_tp = (open_trade["side"] == "BUY" and bar["high"] >= open_trade["tp"]) or (
-                open_trade["side"] == "SELL" and bar["low"] <= open_trade["tp"]
-            )
-            if hit_sl or hit_tp:
-                exit_price = open_trade["sl"] if hit_sl else open_trade["tp"]
-                pips = (exit_price - open_trade["entry"]) / pip_size
-                if open_trade["side"] == "SELL":
-                    pips = -pips
-                # Spread is a real cost on every trade and is charged here so
-                # single-trade and basket results can be compared like for like.
-                profit = round((pips - spread_points) * open_trade["volume"] * 10.0, 2)
-                balance = round(balance + profit, 2)
-                trades.append(
-                    {
-                        "side": open_trade["side"],
-                        "volume": open_trade["volume"],
-                        "entry": round(open_trade["entry"], 5),
-                        "exit": round(float(exit_price), 5),
-                        "sl": round(open_trade["sl"], 5),
-                        "tp": round(open_trade["tp"], 5),
-                        "profit": profit,
-                        "result": "TP" if hit_tp else "SL",
-                        "open_time": str(df.index[open_trade["open_index"]]),
-                        "close_time": str(df.index[i]),
-                    }
-                )
-                open_trade = None
+        if day != when.date():
+            day = when.date()
+            day_realized = 0.0
+            halted_reason = None
 
-        if not open_trade:
-            result = strategy.generate_signal(window)
-            if result.signal != Signal.NONE:
-                decision = risk_manager.evaluate(balance, balance, 0, symbol_info)
-                if decision.allowed:
-                    side = result.signal.value
-                    entry = float(bar["close"])
-                    sl, tp = risk_manager.compute_sl_tp(entry, side, pip_size)
-                    open_trade = {
-                        "side": side,
-                        "volume": decision.volume,
-                        "entry": entry,
-                        "sl": float(sl),
-                        "tp": float(tp),
-                        "open_index": i,
-                    }
+        if halted_reason:
+            equity_curve.append({"time": str(when), "equity": balance})
+            continue
 
-        equity_curve.append({"time": str(df.index[i]), "equity": balance})
+        if basket is None:
+            basket = build(float(bar["open"]), when)
 
-    return _summarize(symbol, period, interval, starting_balance, balance, trades, equity_curve)
+        # Walk the bar. Each leg of the path can fill stops and can reach the
+        # basket target; both are checked in the order price would have met them.
+        for a, b_price in zip(_bar_path(bar), _bar_path(bar)[1:]):
+            rising = b_price >= a
+            lo, hi = min(a, b_price), max(a, b_price)
 
+            triggered = [lvl for lvl in basket.buy_stops if lo <= lvl <= hi]
+            for lvl in sorted(triggered, reverse=not rising):
+                basket.buy_stops.remove(lvl)
+                basket.positions.append({"side": "BUY", "entry": lvl + spread / 2})
+                basket.fills += 1
+            triggered = [lvl for lvl in basket.sell_stops if lo <= lvl <= hi]
+            for lvl in sorted(triggered, reverse=rising):
+                basket.sell_stops.remove(lvl)
+                basket.positions.append({"side": "SELL", "entry": lvl - spread / 2})
+                basket.fills += 1
 
-def _summarize(
-    symbol: str,
-    period: str,
-    interval: str,
-    starting_balance: float,
-    balance: float,
-    trades: list[dict],
-    equity_curve: list[dict],
-) -> dict:
-    wins = [t for t in trades if t["profit"] > 0]
-    losses = [t for t in trades if t["profit"] <= 0]
-    total_profit = round(sum(t["profit"] for t in trades), 2)
-    gross_profit = sum(t["profit"] for t in wins)
-    gross_loss = abs(sum(t["profit"] for t in losses))
+            max_positions_seen = max(max_positions_seen, len(basket.positions))
+            if not basket.positions:
+                continue
+
+            target_price = basket.price_for_profit(basket_take_profit_usd, point, spread)
+            if target_price is not None and lo <= target_price <= hi:
+                close(basket, target_price, when, "TARGET")
+                basket = build(target_price, when)
+                continue
+
+            if basket_stop_loss_usd > 0:
+                stop_price = basket.price_for_profit(-basket_stop_loss_usd, point, spread)
+                if stop_price is not None and lo <= stop_price <= hi:
+                    close(basket, stop_price, when, "BASKET_STOP")
+                    basket = build(stop_price, when)
+
+        floating = basket.profit_at(float(bar["close"]), point, spread) if basket else 0.0
+        equity = round(balance + floating, 2)
+        equity_peak = max(equity_peak, equity)
+        equity_curve.append({"time": str(when), "equity": equity})
+
+        drawdown = (equity_peak - equity) / equity_peak * 100 if equity_peak > 0 else 0
+        if max_daily_loss_usd > 0 and day_realized <= -max_daily_loss_usd:
+            halted_reason = f"daily loss limit ({day_realized:.2f})"
+        elif max_equity_drawdown_percent > 0 and drawdown >= max_equity_drawdown_percent:
+            halted_reason = f"equity drawdown {drawdown:.1f}%"
+        if halted_reason and basket:
+            close(basket, float(bar["close"]), when, "RISK_HALT")
+            basket = None
+
+    wins = [b for b in baskets if b["profit"] > 0]
+    losses = [b for b in baskets if b["profit"] <= 0]
+    gross_profit = sum(b["profit"] for b in wins)
+    gross_loss = abs(sum(b["profit"] for b in losses))
 
     peak = starting_balance
     max_drawdown = 0.0
-    for point in equity_curve:
-        peak = max(peak, point["equity"])
-        drawdown = (peak - point["equity"]) / peak * 100 if peak else 0
-        max_drawdown = max(max_drawdown, drawdown)
+    for point_on_curve in equity_curve:
+        peak = max(peak, point_on_curve["equity"])
+        if peak > 0:
+            max_drawdown = max(max_drawdown, (peak - point_on_curve["equity"]) / peak * 100)
 
     return {
         "symbol": symbol,
@@ -191,350 +243,19 @@ def _summarize(
         "interval": interval,
         "starting_balance": starting_balance,
         "ending_balance": balance,
-        "total_trades": len(trades),
+        "total_trades": len(baskets),
         "wins": len(wins),
         "losses": len(losses),
-        "win_rate": round(len(wins) / len(trades) * 100, 2) if trades else 0,
-        "total_profit": total_profit,
-        # The single biggest loss matters more than usual for basket mode: the
-        # pattern is designed to produce many small wins, so a healthy win rate
-        # says almost nothing on its own.
-        "worst_trade": round(min((t["profit"] for t in trades), default=0.0), 2),
-        "best_trade": round(max((t["profit"] for t in trades), default=0.0), 2),
+        "win_rate": round(len(wins) / len(baskets) * 100, 2) if baskets else 0,
+        "total_profit": round(balance - starting_balance, 2),
         "profit_factor": round(gross_profit / gross_loss, 2) if gross_loss else None,
         "max_drawdown_percent": round(max_drawdown, 2),
+        # On a grid the worst basket is the number that matters. The design
+        # produces a long run of +$10 wins, so a healthy win rate is guaranteed
+        # by construction and says nothing on its own.
+        "worst_trade": round(min((b["profit"] for b in baskets), default=0.0), 2),
+        "best_trade": round(max((b["profit"] for b in baskets), default=0.0), 2),
+        "max_positions_open": max_positions_seen,
         "equity_curve": equity_curve,
-        "trades": trades,
+        "trades": baskets,
     }
-
-
-def _resample(df: pd.DataFrame, minutes: int) -> pd.DataFrame:
-    agg = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
-    return df.resample(f"{minutes}min").agg(agg).dropna()
-
-
-def _run_smc_backtest(
-    df: pd.DataFrame,
-    symbol: str,
-    strategy,
-    risk_manager: RiskManager,
-    symbol_info: SymbolInfo,
-    pip_size: float,
-    starting_balance: float,
-    period: str,
-    interval: str,
-    spread_points: float,
-    setup_expiry_minutes: int = 45,
-) -> dict:
-    """Replays the SMC strategy bar by bar, including the parts of it that live
-    in the engine rather than in the strategy: waiting for the entry zone, the
-    market fallback when price never comes back, setup expiry, and the R ladder
-    that trails the stop.
-
-    The higher timeframes are built by resampling the supplied series, so a
-    useful run needs 1-minute data — feeding it 15-minute bars leaves nothing
-    to resample M1 structure from.
-    """
-    m5_full = _resample(df, 5)
-    m15_full = _resample(df, 15)
-    spread = spread_points * pip_size
-
-    balance = starting_balance
-    trades: list[dict] = []
-    equity_curve: list[dict] = []
-    pending = None
-    pending_since = None
-    open_trade = None
-
-    expiry = setup_expiry_minutes
-    fallback_min_rr = getattr(strategy, "fallback_min_rr", 1.0)
-    # Where setups go tells you far more than the trade count alone: a bot that
-    # finds structure but never fills is a different problem from one that finds
-    # no structure at all.
-    armed = expired = broken = 0
-    stage_counts: dict[str, int] = {}
-
-    for i in range(200, len(df)):
-        bar = df.iloc[i]
-        now = df.index[i]
-
-        if open_trade:
-            hit = _first_hit(_bar_path(bar), open_trade["side"], open_trade["sl"], open_trade["tp"])
-            if hit:
-                exit_price = open_trade["sl"] if hit == "GROUP_STOP" else open_trade["tp"]
-                direction = 1 if open_trade["side"] == "BUY" else -1
-                pips = direction * (exit_price - open_trade["entry"]) / pip_size
-                profit = round((pips - spread_points) * open_trade["volume"] * 10.0, 2)
-                balance = round(balance + profit, 2)
-                trades.append(
-                    {
-                        "side": open_trade["side"],
-                        "volume": open_trade["volume"],
-                        "entry": round(open_trade["entry"], 5),
-                        "exit": round(float(exit_price), 5),
-                        "sl": round(open_trade["initial_sl"], 5),
-                        "tp": round(open_trade["tp"], 5),
-                        "profit": profit,
-                        "result": "SL" if hit == "GROUP_STOP" else "TP",
-                        "entered": open_trade["entered"],
-                        "open_time": str(df.index[open_trade["open_index"]]),
-                        "close_time": str(now),
-                    }
-                )
-                open_trade = None
-            else:
-                # Trail up the R ladder exactly as the engine does live.
-                new_sl = risk_manager.compute_rr_ladder_sl(
-                    open_trade["side"], open_trade["entry"], open_trade["risk"],
-                    open_trade["sl"], float(bar["close"]), 0.0,
-                )
-                if new_sl is not None:
-                    open_trade["sl"] = new_sl
-
-        if open_trade is None and pending is None:
-            k15 = m15_full.index.searchsorted(now, side="right")
-            k5 = m5_full.index.searchsorted(now, side="right")
-            m15 = m15_full.iloc[max(0, k15 - 200) : k15]
-            m5 = m5_full.iloc[max(0, k5 - 200) : k5]
-            m1 = df.iloc[max(0, i - 199) : i + 1]
-            setup = strategy.generate_setup(m15, m5, m1, float(bar["close"]), pip_size, spread)
-            stage_counts[setup.stage] = stage_counts.get(setup.stage, 0) + 1
-            if setup.signal != Signal.NONE:
-                pending, pending_since = setup, now
-                armed += 1
-
-        elif open_trade is None and pending is not None:
-            is_buy = pending.signal == Signal.BUY
-            stale = expiry and (now - pending_since).total_seconds() / 60 >= expiry
-            zone_broken = bar["low"] < pending.sl if is_buy else bar["high"] > pending.sl
-            tapped = bar["low"] <= pending.entry if is_buy else bar["high"] >= pending.entry
-            ran_away = bar["high"] >= pending.fallback_price if is_buy else bar["low"] <= pending.fallback_price
-
-            entry_price, entered = None, None
-            if tapped:
-                entry_price, entered = pending.entry, "tap"
-            elif ran_away:
-                price = pending.fallback_price
-                risk_left = abs(price - pending.sl)
-                rr_left = abs(pending.tp - price) / risk_left if risk_left > 0 else 0
-                if rr_left >= fallback_min_rr:
-                    entry_price, entered = price, "fallback"
-
-            if entry_price is not None:
-                risk = abs(entry_price - pending.sl)
-                stop_pips = risk / pip_size
-                volume = risk_manager.calculate_position_size(balance, symbol_info, stop_pips)
-                open_trade = {
-                    "side": pending.signal.value, "entry": float(entry_price),
-                    "sl": float(pending.sl), "initial_sl": float(pending.sl),
-                    "tp": float(pending.tp), "risk": risk, "volume": volume,
-                    "open_index": i, "entered": entered,
-                }
-                pending = pending_since = None
-            elif stale or zone_broken:
-                expired += 1 if stale else 0
-                broken += 0 if stale else 1
-                pending = pending_since = None
-
-        floating = 0.0
-        if open_trade:
-            direction = 1 if open_trade["side"] == "BUY" else -1
-            floating = (
-                direction * (float(bar["close"]) - open_trade["entry"]) / pip_size - spread_points
-            ) * open_trade["volume"] * 10.0
-        equity_curve.append({"time": str(now), "equity": round(balance + floating, 2)})
-
-    result = _summarize(symbol, period, interval, starting_balance, balance, trades, equity_curve)
-    # How the entries were won matters when judging the fallback rule: tap
-    # entries are the planned ones, fallback entries are the trades that would
-    # simply have been missed before.
-    taps = [t for t in trades if t.get("entered") == "tap"]
-    fallbacks = [t for t in trades if t.get("entered") == "fallback"]
-    result["entry_breakdown"] = {
-        "tap": {"count": len(taps), "profit": round(sum(t["profit"] for t in taps), 2)},
-        "fallback": {"count": len(fallbacks), "profit": round(sum(t["profit"] for t in fallbacks), 2)},
-    }
-    result["setup_funnel"] = {
-        "armed": armed,
-        "filled": len(trades),
-        "expired": expired,
-        "invalidated": broken,
-    }
-    # Which gate the strategy stopped at, and how often. When a run produces
-    # almost no setups this is the only thing that says which filter to reach
-    # for — the trade count alone cannot tell "no structure" from "structure
-    # found but never reached".
-    checks = sum(stage_counts.values()) or 1
-    result["stage_breakdown"] = [
-        {"stage": stage, "count": count, "percent": round(count / checks * 100, 1)}
-        for stage, count in sorted(stage_counts.items(), key=lambda kv: -kv[1])
-    ]
-    return result
-
-
-def _bar_path(bar) -> list[float]:
-    """The order prices are assumed to have been visited inside one bar.
-
-    A bar only records four numbers, so the route between them is a guess. The
-    usual convention is used: an up bar is assumed to have dipped to its low
-    before running to its high, a down bar the reverse. This matters a great
-    deal for baskets, where the group target and the group stop can both sit
-    inside a single bar's range — always resolving that in the strategy's
-    favour makes any losing method look good, and always resolving it against
-    makes every full basket a loss.
-    """
-    o, h, l, c = float(bar["open"]), float(bar["high"]), float(bar["low"]), float(bar["close"])
-    return [o, l, h, c] if c >= o else [o, h, l, c]
-
-
-def _first_hit(path: list[float], side: str, stop_price: float, target_price: float) -> str | None:
-    """Walks the assumed intrabar path and reports which level was reached
-    first: "GROUP_STOP", "TARGET", or None."""
-    for a, b in zip(path, path[1:]):
-        lo, hi = min(a, b), max(a, b)
-        if side == "BUY":
-            hit_stop, hit_target = lo <= stop_price, hi >= target_price
-        else:
-            hit_stop, hit_target = hi >= stop_price, lo <= target_price
-        if hit_stop and hit_target:
-            # The segment is monotone, so whichever level lies nearer the
-            # segment's start is crossed first.
-            return "GROUP_STOP" if abs(stop_price - a) <= abs(target_price - a) else "TARGET"
-        if hit_stop:
-            return "GROUP_STOP"
-        if hit_target:
-            return "TARGET"
-    return None
-
-
-def _group_exit_price(legs: list[dict], side: str, target_usd: float, pip_size: float) -> float:
-    """The price at which the basket's combined P&L equals target_usd exactly.
-
-    Each leg pays (exit - entry)/pip_size * volume * 10 (negated for SELL), so
-    the combined P&L is linear in the exit price and can be solved directly
-    rather than approximated by the bar's high or low.
-    """
-    total_volume = sum(leg["volume"] for leg in legs)
-    weighted_entry = sum(leg["entry"] * leg["volume"] for leg in legs)
-    direction = 1 if side == "BUY" else -1
-    k = target_usd * pip_size / 10.0
-    return (weighted_entry + direction * k) / total_volume
-
-
-def _run_basket_backtest(
-    df,
-    symbol: str,
-    strategy: EmaRsiStrategy,
-    risk_manager: RiskManager,
-    symbol_info: SymbolInfo,
-    pip_size: float,
-    starting_balance: float,
-    period: str,
-    interval: str,
-    max_entries: int,
-    add_gap_points: float,
-    target_usd: float,
-    max_loss_usd: float,
-    max_bars: int,
-    spread_points: float,
-) -> dict:
-    """Simulates the multi-entry basket: several entries in one direction,
-    exited together on combined profit, combined loss, or age.
-
-    Each basket is recorded as one trade, so the statistics describe the
-    group's result rather than the many small legs it is made of — counting the
-    legs separately is what makes this pattern look like a high win rate.
-
-    Spread is charged on every leg, which is not a detail here: the group
-    target is a fixed dollar amount, so the more legs a basket holds the
-    smaller the price move it needs — while the cost of opening those legs
-    keeps growing. On gold a 24-point spread costs roughly $1.20 per 0.05-lot
-    leg, so a five-leg basket has already spent $6 chasing a $3 target.
-    """
-    balance = starting_balance
-    equity_curve: list[dict] = []
-    trades: list[dict] = []
-    legs: list[dict] = []
-    side: str | None = None
-    opened_at: int | None = None
-
-    higher_tf_bars = 5 * 25 if getattr(strategy, "higher_timeframe", None) else 0
-    min_len = max(strategy.ema_slow_period, strategy.rsi_period, higher_tf_bars) + 2
-
-    def close_basket(exit_price: float, index: int, outcome: str) -> None:
-        nonlocal balance, legs, side, opened_at
-        direction = 1 if side == "BUY" else -1
-        profit = 0.0
-        for leg in legs:
-            profit += direction * (exit_price - leg["entry"]) / pip_size * leg["volume"] * 10.0
-            profit -= spread_points * leg["volume"] * 10.0
-        profit = round(profit, 2)
-        balance = round(balance + profit, 2)
-        trades.append(
-            {
-                "side": side,
-                "volume": round(sum(leg["volume"] for leg in legs), 2),
-                "entries": len(legs),
-                "entry": round(sum(leg["entry"] * leg["volume"] for leg in legs) / sum(leg["volume"] for leg in legs), 5),
-                "exit": round(float(exit_price), 5),
-                "profit": profit,
-                "result": outcome,
-                "open_time": str(df.index[opened_at]),
-                "close_time": str(df.index[index]),
-            }
-        )
-        legs = []
-        side = None
-        opened_at = None
-
-    for i in range(min_len, len(df)):
-        window = df.iloc[: i + 1]
-        bar = df.iloc[i]
-
-        if legs:
-            # The target and stop are the prices at which the group's combined
-            # P&L, spread already paid, equals the two limits.
-            spread_cost = sum(spread_points * leg["volume"] * 10.0 for leg in legs)
-            stop_price = _group_exit_price(legs, side, -max_loss_usd + spread_cost, pip_size)
-            target_price = _group_exit_price(legs, side, target_usd + spread_cost, pip_size)
-            hit = _first_hit(_bar_path(bar), side, stop_price, target_price)
-            if hit == "GROUP_STOP":
-                close_basket(stop_price, i, "GROUP_STOP")
-            elif hit == "TARGET":
-                close_basket(target_price, i, "TARGET")
-            elif max_bars and opened_at is not None and (i - opened_at) >= max_bars:
-                close_basket(float(bar["close"]), i, "TIME")
-
-        result = strategy.generate_signal(window)
-        if result.signal != Signal.NONE:
-            wanted_side = result.signal.value
-            price = float(bar["close"])
-            can_enter = False
-            if not legs:
-                can_enter = True
-            elif wanted_side == side and len(legs) < max_entries:
-                direction = 1 if side == "BUY" else -1
-                adverse_points = direction * (legs[-1]["entry"] - price) / pip_size
-                can_enter = adverse_points >= add_gap_points
-            if can_enter:
-                decision = risk_manager.evaluate(balance, balance, 0, symbol_info)
-                if decision.allowed:
-                    if not legs:
-                        side = wanted_side
-                        opened_at = i
-                    legs.append({"entry": price, "volume": decision.volume})
-
-        floating = 0.0
-        if legs:
-            direction = 1 if side == "BUY" else -1
-            close_price = float(bar["close"])
-            floating = sum(
-                direction * (close_price - leg["entry"]) / pip_size * leg["volume"] * 10.0
-                - spread_points * leg["volume"] * 10.0
-                for leg in legs
-            )
-        # Equity, not balance: an open basket's unrealized loss is exactly what
-        # this pattern hides, so drawdown has to be measured with it included.
-        equity_curve.append({"time": str(df.index[i]), "equity": round(balance + floating, 2)})
-
-    return _summarize(symbol, period, interval, starting_balance, balance, trades, equity_curve)

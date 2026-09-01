@@ -18,8 +18,7 @@ export default function App() {
   const [liveAccount, setLiveAccount] = useState(null);
   const [liveOpenPositions, setLiveOpenPositions] = useState([]);
   const [lastSignal, setLastSignal] = useState(null);
-  const [basket, setBasket] = useState(null);
-  const [setup, setSetup] = useState(null);
+  const [grid, setGrid] = useState(null);
   const [busy, setBusy] = useState(false);
   const [globalError, setGlobalError] = useState(null);
   const [tab, setTab] = useState("dashboard");
@@ -94,8 +93,7 @@ export default function App() {
           risk_allowed: payload.risk_allowed,
           risk_reason: payload.risk_reason,
         });
-        setBasket(payload.basket || null);
-        setSetup({ stage: payload.setup_stage, pending: payload.pending_setup || null });
+        setGrid(payload.grid || null);
       }
     });
     return () => {
@@ -192,36 +190,31 @@ export default function App() {
             </div>
           )}
 
-          {status?.structural && setup && (
+          {grid && (
             <div className="panel signal-panel">
-              <h3>SMC Setup</h3>
-              {setup.pending ? (
-                <>
-                  <p>
-                    Planned <b>{setup.pending.side}</b> — waiting for price to reach{" "}
-                    <b>{setup.pending.entry}</b>
-                  </p>
-                  <p className="muted">
-                    Stop {setup.pending.sl} · Target {setup.pending.tp} · Reward:risk 1:{setup.pending.rr}
-                  </p>
-                </>
-              ) : (
-                <p className="muted">{setup.stage || "scanning structure"}</p>
-              )}
-            </div>
-          )}
-
-          {basket && (
-            <div className="panel signal-panel">
-              <h3>Basket</h3>
+              <h3>Grid</h3>
               <p>
-                {basket.entries} of {basket.max_entries} entries open — combined{" "}
-                <b className={basket.floating >= 0 ? "tone-green" : "tone-red"}>
-                  {basket.floating >= 0 ? "+" : "-"}${Math.abs(basket.floating).toFixed(2)}
-                </b>{" "}
-                (closes all at +${basket.target}, group stop at -${basket.max_loss})
+                {grid.buy_stops} BUY STOP · {grid.sell_stops} SELL STOP resting ·{" "}
+                <b>{grid.open_positions}</b> position{grid.open_positions === 1 ? "" : "s"} open
+                {grid.reference_price ? ` · grid built at ${grid.reference_price}` : ""}
               </p>
-              {basket.last_event && <p className="muted">Last group exit: {basket.last_event}</p>}
+              <p>
+                Basket:{" "}
+                <b className={grid.basket_profit >= 0 ? "tone-green" : "tone-red"}>
+                  {grid.basket_profit >= 0 ? "+" : "-"}${Math.abs(grid.basket_profit).toFixed(2)}
+                </b>{" "}
+                of ${grid.target} target · {grid.baskets_won} closed at target
+                {grid.baskets_stopped > 0 ? ` · ${grid.baskets_stopped} stopped out` : ""}
+              </p>
+              {grid.last_event && <p className="muted">Last: {grid.last_event}</p>}
+              {grid.hedged && (
+                <p className="error-text">
+                  ⚠ Basket fully hedged. Buys and sells now cancel out, so its profit is frozen at $
+                  {grid.basket_profit.toFixed(2)} and no price movement can reach the ${grid.target} target. Only
+                  the basket stop loss or a risk limit will end it.
+                </p>
+              )}
+              {grid.halted && <p className="error-text">⚠ Halted — {grid.halted}</p>}
             </div>
           )}
 

@@ -10,6 +10,24 @@ class OrderSide(str, Enum):
     SELL = "SELL"
 
 
+class PendingType(str, Enum):
+    """Stop orders only. A BUY STOP rests above the market and fills when price
+    rises into it; a SELL STOP rests below and fills when price falls into it."""
+
+    BUY_STOP = "BUY_STOP"
+    SELL_STOP = "SELL_STOP"
+
+
+@dataclass
+class PendingOrder:
+    ticket: str
+    symbol: str
+    order_type: PendingType
+    volume: float
+    price: float
+    comment: str = ""
+
+
 @dataclass
 class AccountInfo:
     balance: float
@@ -29,6 +47,7 @@ class Position:
     tp: float
     open_time: str
     profit: float
+    magic: int = 0  # which program opened it; 0 means unknown/manual
 
 
 @dataclass
@@ -66,12 +85,38 @@ class BrokerAdapter(ABC):
         ...
 
     @abstractmethod
-    def get_open_positions(self, symbol: str | None = None) -> list[Position]: ...
+    def get_open_positions(self, symbol: str | None = None, magic: int | None = None) -> list[Position]:
+        """Open positions, filtered to `magic` when given so the bot manages only
+        its own trades and leaves manual ones alone."""
+        ...
 
     @abstractmethod
     def place_order(
         self, symbol: str, side: OrderSide, volume: float, sl: float, tp: float
     ) -> Position: ...
+
+    @abstractmethod
+    def place_pending_order(
+        self,
+        symbol: str,
+        order_type: PendingType,
+        volume: float,
+        price: float,
+        comment: str = "",
+        magic: int = 0,
+    ) -> PendingOrder:
+        """Rests a stop order at `price`. `magic` tags it so the bot can tell its
+        own orders from anything placed by hand or by another program."""
+        ...
+
+    @abstractmethod
+    def get_pending_orders(self, symbol: str | None = None, magic: int | None = None) -> list[PendingOrder]:
+        """Orders still waiting to fill. Filtered to `magic` when given, so the
+        bot never counts or cancels orders it did not place."""
+        ...
+
+    @abstractmethod
+    def cancel_pending_order(self, ticket: str) -> None: ...
 
     @abstractmethod
     def close_position(self, ticket: str) -> float:
