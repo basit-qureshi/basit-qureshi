@@ -111,14 +111,23 @@ class Settings(BaseSettings):
     # structure it was read from goes stale.
     smc_setup_expiry_minutes: int = 45
     # The two gates that decide how OFTEN a setup appears at all.
+    #
     # How long after an M1 market structure shift the shift still counts, in M1
-    # bars. Price can sit inside an order block for a while before turning, and
-    # too short a window throws those away before the turn happens.
-    smc_mss_max_age: int = 15
+    # bars. This was 15, which was simply wrong: measured over 6000 M1 bars, an
+    # M1 shift ALWAYS existed once price was in the zone — every setup lost at
+    # this gate was lost to the shift being judged stale, never to there being
+    # no shift. Widening it converts those directly:
+    #     window   setups ready   lost as "too old"
+    #     15             34              42
+    #     45             69               2
+    #     120            71               0
+    smc_mss_max_age: int = 45
     # How close to the M15 order block counts as "price has reached it", in
     # points. Widening this catches setups where price stops just short of the
-    # zone; too wide and it arms setups price never really came back for.
-    smc_zone_tolerance_points: float = 20
+    # zone; too wide and it arms setups price never really came back for. On the
+    # same data, 20 -> 60 raised in-zone checks from 92 to 116, and 150 to 214 —
+    # 60 is the middle that does not stretch "reached the zone" too far.
+    smc_zone_tolerance_points: float = 60
     # How permissive the entry filters are: "aggressive" trades far more often
     # (each signal is weaker), "conservative" waits for cleaner setups.
     sensitivity: str = "balanced"

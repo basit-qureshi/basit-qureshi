@@ -130,11 +130,17 @@ def _find_order_block(
     return None
 
 
-def _find_mss(df: pd.DataFrame, direction: str, n: int, max_age: int) -> int | None:
-    """Bar index of a recent Market Structure Shift in `direction`, or None.
+def _find_mss(df: pd.DataFrame, direction: str, n: int, max_age: int) -> tuple[int | None, int | None]:
+    """Bar index of a recent Market Structure Shift in `direction`.
 
     For a long that means a close above the last pivot high, which says the
     pullback that brought price into the zone has stopped making lower highs.
+
+    Returns (bar, age). `bar` is None when there is no usable shift, and `age`
+    then says why: None means no shift exists at all in this window, a number
+    means one exists but is older than max_age. Those two call for opposite
+    fixes — one is the structure, the other is only the window — so they are
+    reported separately rather than collapsed into a single "not found".
     """
     close = df["close"].to_numpy()
     pivots = _swing_high_indices(df, n) if direction == "bullish" else _swing_low_indices(df, n)
@@ -147,9 +153,12 @@ def _find_mss(df: pd.DataFrame, direction: str, n: int, max_age: int) -> int | N
                 if newest is None or j > newest:
                     newest = j
                 break
-    if newest is None or (len(df) - 1 - newest) > max_age:
-        return None
-    return newest
+    if newest is None:
+        return None, None
+    age = len(df) - 1 - newest
+    if age > max_age:
+        return None, age
+    return newest, age
 
 
 def _entry_zone(df: pd.DataFrame, direction: str, lookback: int) -> tuple[float, float] | None:
@@ -173,9 +182,9 @@ class SmcStrategy:
     SENSITIVITY_PRESETS = {
         # swing_n: how many bars either side define a pivot. Smaller sees more
         # structure (more setups, more noise); larger only reacts to obvious swings.
-        "aggressive": dict(swing_n=1, mss_swing_n=1, min_rr=1.5, zone_tolerance_points=40),
-        "balanced": dict(swing_n=2, mss_swing_n=2, min_rr=2.0, zone_tolerance_points=20),
-        "conservative": dict(swing_n=3, mss_swing_n=2, min_rr=2.5, zone_tolerance_points=10),
+        "aggressive": dict(swing_n=1, mss_swing_n=1, min_rr=1.5, zone_tolerance_points=150),
+        "balanced": dict(swing_n=2, mss_swing_n=2, min_rr=2.0, zone_tolerance_points=60),
+        "conservative": dict(swing_n=3, mss_swing_n=2, min_rr=2.5, zone_tolerance_points=30),
     }
 
     @classmethod
@@ -188,13 +197,13 @@ class SmcStrategy:
         swing_n: int = 2,
         mss_swing_n: int = 2,
         min_rr: float = 2.0,
-        zone_tolerance_points: float = 20,
+        zone_tolerance_points: float = 60,
         sl_buffer_points: float = 20,
         fallback_points: float = 150,
         fallback_min_rr: float = 1.0,
         ob_lookback: int = 30,
         fvg_window: int = 3,
-        mss_max_age: int = 15,
+        mss_max_age: int = 45,
         m5_zone_lookback: int = 12,
     ):
         self.swing_n = swing_n
@@ -281,12 +290,19 @@ class SmcStrategy:
                 stage="waiting for OB",
             )
 
-        mss_bar = _find_mss(m1, direction, self.mss_swing_n, self.mss_max_age)
+        mss_bar, mss_age = _find_mss(m1, direction, self.mss_swing_n, self.mss_max_age)
         if mss_bar is None:
+            if mss_age is None:
+                return SmcSetup(
+                    Signal.NONE,
+                    "price is in the M15 order block, but M1 has not shifted structure yet",
+                    stage="waiting for MSS",
+                )
             return SmcSetup(
                 Signal.NONE,
-                "price is in the M15 order block, waiting for an M1 market structure shift",
-                stage="waiting for MSS",
+                f"price is in the M15 order block and M1 did shift, but {mss_age} bars ago "
+                f"(limit {self.mss_max_age}) — raise 'MSS still counts for' to take these",
+                stage="MSS too old",
             )
         mss_price = float(m1["close"].iloc[mss_bar])
 
