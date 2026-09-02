@@ -34,6 +34,7 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
       grid_sell_stop_levels: Number(form.grid_sell_stop_levels),
       grid_distance: Number(form.grid_distance),
       grid_basket_take_profit_usd: Number(form.grid_basket_take_profit_usd),
+      grid_daily_profit_target_usd: Number(form.grid_daily_profit_target_usd),
       grid_basket_stop_loss_usd: Number(form.grid_basket_stop_loss_usd),
       grid_max_open_positions: Number(form.grid_max_open_positions),
       grid_max_daily_loss_usd: Number(form.grid_max_daily_loss_usd),
@@ -55,6 +56,17 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
         every open position reaches <i>Basket take profit</i>, all of them close together, every remaining pending
         order is cancelled, and a fresh grid is built around the new price. No single trade has to reach the target
         on its own.
+      </p>
+      <p className="muted">
+        <b>Daily profit target</b> stops the bot for the rest of the broker day once that much{" "}
+        <i>net realized</i> profit has been booked — settled trades after their losses, commission and swap, never
+        floating profit. It is judged on this bot's own trades only, so a manual order or a test trade cannot move
+        it, and the lock is worked out from those trades rather than remembered in memory: restarting the backend,
+        refreshing the page or pressing Start again will not get past it. Set it to 0 to switch it off.
+      </p>
+      <p className="muted">
+        A fresh grid is never placed on the same M1 candle the bot became ready on — whether that was Start Bot, a
+        basket closing, or the grid being deleted by hand in MT5. It waits for the broker to confirm a later candle.
       </p>
       <p className="muted">
         There are no indicators and no per-trade stop loss or take profit. A grid position is only ever closed by
@@ -136,6 +148,18 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
             min="0.5"
             value={form.grid_basket_take_profit_usd}
             onChange={(e) => update("grid_basket_take_profit_usd", e.target.value)}
+          />
+        </label>
+
+        <label>
+          Daily profit target ($, net realized, 0 = off)
+          <input
+            disabled={running}
+            type="number"
+            step="0.5"
+            min="0"
+            value={form.grid_daily_profit_target_usd}
+            onChange={(e) => update("grid_daily_profit_target_usd", e.target.value)}
           />
         </label>
 

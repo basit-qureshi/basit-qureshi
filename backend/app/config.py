@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     # Close the WHOLE basket the moment the combined net profit of every open
     # grid position reaches this. Not per trade — the total.
     grid_basket_take_profit_usd: float = 10.0
+    # Stop trading for the rest of the broker day once this much NET REALIZED
+    # profit has been booked. 0 = off, and it is deliberately off by default:
+    # the amount is the user's decision, not a number to guess for them.
+    # Realized means settled trades after their losses, commission and swap -
+    # never floating profit, never equity movement.
+    grid_daily_profit_target_usd: float = 0.0
     # Optional mirror of the target on the losing side: close the basket at this
     # combined loss. 0 = off, which is the strategy exactly as specified. Off
     # means a losing basket is bounded only by the two limits below.
@@ -57,6 +63,12 @@ class Settings(BaseSettings):
     # UTC hours. 0-24 means trade around the clock.
     grid_trading_start_hour: int = 0
     grid_trading_end_hour: int = 24
+
+    # Timezone used to decide which broker trading day a candle belongs to, and
+    # to show times on the dashboard. Broker candle stamps arrive without a
+    # zone, so they are read as UTC and converted here; set this to your
+    # broker's zone if its day should roll over at a different hour.
+    timezone: str = "Asia/Karachi"
 
     database_url: str = "sqlite:///./trading_bot.db"
 

@@ -1,5 +1,3 @@
-from datetime import date
-
 import pandas as pd
 from fastapi import APIRouter, HTTPException
 
@@ -7,7 +5,8 @@ from app.api.schemas import BacktestRequest, ModeUpdate, SettingsUpdate, StartRe
 from app.backtest.backtester import run_grid_backtest
 from app.bot_manager import bot_manager
 from app.brokers.base import OrderSide
-from app.db import SessionLocal, TradeRecord
+from app import db as db_module
+from app.db import TradeRecord
 from app.strategy.indicators import ema
 
 router = APIRouter(prefix="/api")
@@ -47,7 +46,7 @@ async def stop_bot():
 
 @router.get("/trades")
 def get_trades(limit: int = 100):
-    with SessionLocal() as session:
+    with db_module.SessionLocal() as session:
         records = session.query(TradeRecord).order_by(TradeRecord.open_time.desc()).limit(limit).all()
         return [
             {
@@ -72,7 +71,7 @@ def get_trades(limit: int = 100):
 
 @router.get("/stats")
 def get_stats():
-    with SessionLocal() as session:
+    with db_module.SessionLocal() as session:
         closed = session.query(TradeRecord).filter(TradeRecord.status == "CLOSED").all()
         open_count = session.query(TradeRecord).filter(TradeRecord.status == "OPEN").count()
 
@@ -89,8 +88,11 @@ def get_stats():
         avg_win = round(gross_profit / len(wins), 2) if wins else 0
         avg_loss = round(gross_loss / len(losses), 2) if losses else 0
         profit_factor = round(gross_profit / gross_loss, 2) if gross_loss else None
-        today_records = [r for r in closed if r.close_time and r.close_time.date() == date.today()]
-        today_profit = sum(r.profit or 0 for r in today_records)
+        # The daily figures come from the engine's own accounting source, scoped
+        # to this bot's symbol, mode, magic number and broker trading day, so a
+        # manual test order or another EA cannot move them and the dashboard can
+        # never disagree with the number the daily halt was judged on.
+        daily = bot_manager.engine.daily_summary()
 
         ordered = sorted(closed, key=lambda r: r.close_time or r.open_time)
         equity_curve = []
@@ -106,7 +108,16 @@ def get_stats():
             "losses": len(losses),
             "win_rate": round(len(wins) / len(decided) * 100, 2) if decided else 0,
             "total_profit": round(total_profit, 2),
-            "today_profit": round(today_profit, 2),
+            # Kept so anything still reading the old field keeps working; it is
+            # the same number as today_net_profit_usd.
+            "today_profit": daily["today_net_profit_usd"],
+            "today_gross_profit_usd": daily["today_gross_profit_usd"],
+            "today_gross_loss_usd": daily["today_gross_loss_usd"],
+            "today_net_profit_usd": daily["today_net_profit_usd"],
+            "today_unsettled_trades": daily["today_unsettled_trades"],
+            "daily_target": bot_manager.engine.daily_profit_target_usd,
+            "daily_target_hit": bot_manager.engine._daily_target_hit,
+            "trading_day": bot_manager.engine._trading_day,
             "open_trades": open_count,
             "avg_win": avg_win,
             "avg_loss": avg_loss,
@@ -202,7 +213,7 @@ def test_order(body: TestOrderRequest):
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 
-    with SessionLocal() as session:
+    with db_module.SessionLocal() as session:
         session.add(
             TradeRecord(
                 ticket=position.ticket,
@@ -234,6 +245,7 @@ def backtest(body: BacktestRequest):
             sell_stop_levels=body.sell_stop_levels,
             grid_distance=body.grid_distance,
             basket_take_profit_usd=body.basket_take_profit_usd,
+            daily_profit_target_usd=body.daily_profit_target_usd,
             basket_stop_loss_usd=body.basket_stop_loss_usd,
             spread_points=body.spread_points,
             max_daily_loss_usd=body.max_daily_loss_usd,

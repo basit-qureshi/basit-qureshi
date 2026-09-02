@@ -8,3 +8,5 @@ numpy>=2.1.1
 python-dotenv>=1.0.1
 yfinance>=0.2.43
 websockets>=13.1
+pytest>=8.0
+httpx2>=0.1

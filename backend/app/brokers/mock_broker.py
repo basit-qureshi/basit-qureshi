@@ -121,7 +121,7 @@ class MockBroker(BrokerAdapter):
         opens[0] = base
         highs = np.maximum(opens, closes) + np.abs(self._rng.normal(0, step / 2, n))
         lows = np.minimum(opens, closes) - np.abs(self._rng.normal(0, step / 2, n))
-        idx = pd.date_range(end=pd.Timestamp.utcnow(), periods=n, freq="15min")
+        idx = pd.date_range(end=pd.Timestamp.now("UTC"), periods=n, freq="15min")
         df = pd.DataFrame(
             {"open": opens, "high": highs, "low": lows, "close": closes, "volume": self._rng.integers(100, 1000, n)},
             index=idx,
@@ -141,7 +141,7 @@ class MockBroker(BrokerAdapter):
         new_low = min(new_open, new_close) - abs(self._rng.normal(0, step / 2))
         new_row = pd.DataFrame(
             {"open": [new_open], "high": [new_high], "low": [new_low], "close": [new_close], "volume": [500]},
-            index=[pd.Timestamp.utcnow()],
+            index=[pd.Timestamp.now("UTC")],
         )
         self._candle_cache[symbol] = pd.concat([df, new_row]).iloc[-2000:]
         self._prices[symbol] = float(new_close)

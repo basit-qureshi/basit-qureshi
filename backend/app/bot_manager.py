@@ -8,7 +8,8 @@ from sqlalchemy import or_
 from app.brokers import get_broker
 from app.brokers.base import BrokerAdapter
 from app.config import settings
-from app.db import SessionLocal, TradeRecord, init_db
+from app import db as db_module
+from app.db import TradeRecord, init_db
 from app.engine.grid_engine import GridEngine
 
 _SETTINGS_FILE = Path(__file__).resolve().parent.parent / "runtime_settings.json"
@@ -31,6 +32,7 @@ class BotManager:
             "grid_sell_stop_levels": settings.grid_sell_stop_levels,
             "grid_distance": settings.grid_distance,
             "grid_basket_take_profit_usd": settings.grid_basket_take_profit_usd,
+            "grid_daily_profit_target_usd": settings.grid_daily_profit_target_usd,
             "grid_basket_stop_loss_usd": settings.grid_basket_stop_loss_usd,
             "grid_max_open_positions": settings.grid_max_open_positions,
             "grid_max_daily_loss_usd": settings.grid_max_daily_loss_usd,
@@ -38,6 +40,7 @@ class BotManager:
             "grid_magic_number": settings.grid_magic_number,
             "grid_trading_start_hour": settings.grid_trading_start_hour,
             "grid_trading_end_hour": settings.grid_trading_end_hour,
+            "timezone": settings.timezone,
             "mode": settings.account_type,
         }
         self._load_persisted_settings()
@@ -79,6 +82,8 @@ class BotManager:
             sell_stop_levels=s["grid_sell_stop_levels"],
             grid_distance=s["grid_distance"],
             basket_take_profit_usd=s["grid_basket_take_profit_usd"],
+            daily_profit_target_usd=s["grid_daily_profit_target_usd"],
+            timezone_name=s["timezone"],
             basket_stop_loss_usd=s["grid_basket_stop_loss_usd"],
             max_open_positions=s["grid_max_open_positions"],
             max_daily_loss_usd=s["grid_max_daily_loss_usd"],
@@ -130,7 +135,7 @@ class BotManager:
             live_tickets = {p.ticket for p in self.broker.get_open_positions()}
         except Exception:
             return
-        with SessionLocal() as session:
+        with db_module.SessionLocal() as session:
             stale = session.query(TradeRecord).filter(TradeRecord.status == "OPEN").all()
             for record in stale:
                 if record.ticket not in live_tickets:

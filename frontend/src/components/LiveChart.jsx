@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createChart, CandlestickSeries, LineSeries, createSeriesMarkers } from "lightweight-charts";
 import { api } from "../api";
+import { DISPLAY_TIMEZONE } from "../time";
 
 export default function LiveChart({ trades }) {
   const containerRef = useRef(null);
@@ -20,6 +21,18 @@ export default function LiveChart({ trades }) {
         horzLines: { color: "rgba(150,150,150,0.1)" },
       },
       timeScale: { timeVisible: true, secondsVisible: false },
+      // The chart library labels the time axis in UTC unless told otherwise, so
+      // the axis is shifted into the account owner's zone to match the rest of
+      // the dashboard. Only the labels move; the data is untouched.
+      localization: {
+        timeFormatter: (ts) =>
+          new Date(ts * 1000).toLocaleTimeString("en-GB", {
+            timeZone: DISPLAY_TIMEZONE,
+            hour: "2-digit",
+            minute: "2-digit",
+            hour12: false,
+          }),
+      },
     });
 
     const candleSeries = chart.addSeries(CandlestickSeries, {

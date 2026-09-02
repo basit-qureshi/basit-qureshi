@@ -19,7 +19,13 @@ Two things are modelled carefully because they decide the answer:
 A basket that closes on a bar leaves the rest of that bar empty: the next grid
 is not built until the following candle opens, which is what the live engine
 does. Rebuilding within the same bar would put fresh stops straight back into
-the move that just paid out.
+the move that just paid out. The first bar of the run is activation and gets
+the same treatment, so a backtest starts the way a live start does.
+
+The daily profit target is judged here on realized basket results only, and
+re-judged the moment a basket settles, which is the order the live engine uses.
+Once it is reached no further basket starts that day, and the next data day
+clears the lock and re-arms the gate.
 """
 
 import pandas as pd
@@ -121,6 +127,7 @@ def run_grid_backtest(
     sell_stop_levels: int = 10,
     grid_distance: float = 0.30,
     basket_take_profit_usd: float = 10.0,
+    daily_profit_target_usd: float = 0.0,
     basket_stop_loss_usd: float = 0.0,
     spread_points: float = 24.0,
     max_daily_loss_usd: float = 100.0,
@@ -146,6 +153,11 @@ def run_grid_backtest(
     day = None
     day_realized = 0.0
     max_positions_seen = 0
+    daily_target_halts = 0
+    daily_target_locked = False
+    # The first bar is activation, exactly as clicking Start is in the live
+    # engine: the opening grid waits for the candle after it.
+    activated = False
 
     def build(price: float, when) -> _Basket:
         b = _Basket(price, lot_size, value_per_point)
@@ -155,7 +167,7 @@ def run_grid_backtest(
         return b
 
     def close(b: _Basket, price: float, when, outcome: str) -> None:
-        nonlocal balance, day_realized
+        nonlocal balance, day_realized, daily_target_locked, daily_target_halts
         profit = round(b.profit_at(price, point, spread), 2)
         balance = round(balance + profit, 2)
         day_realized += profit
@@ -170,6 +182,13 @@ def run_grid_backtest(
                 "close_time": str(when),
             }
         )
+        # Judged on realized results only, and re-judged the moment a basket
+        # settles - the same order the live engine uses. Compared in whole
+        # cents so 9.99 does not pass for 10.00.
+        if daily_profit_target_usd > 0 and not daily_target_locked:
+            if round(day_realized * 100) >= round(daily_profit_target_usd * 100):
+                daily_target_locked = True
+                daily_target_halts += 1
 
     for i in range(len(df)):
         bar = df.iloc[i]
@@ -179,12 +198,25 @@ def run_grid_backtest(
             day = when.date()
             day_realized = 0.0
             halted_reason = None
+            # A new day clears the daily-target lock and re-arms the gate, so
+            # the first grid of the day does not land on the rollover bar.
+            daily_target_locked = False
+            closed_on_bar = i
 
         if halted_reason:
             equity_curve.append({"time": str(when), "equity": balance})
             continue
 
         if basket is None:
+            if not activated:
+                # Activation bar: no orders are placed on it at all.
+                activated = True
+                closed_on_bar = i
+                equity_curve.append({"time": str(when), "equity": balance})
+                continue
+            if daily_target_locked:
+                equity_curve.append({"time": str(when), "equity": balance})
+                continue
             if closed_on_bar is not None and i <= closed_on_bar:
                 equity_curve.append({"time": str(when), "equity": balance})
                 continue
@@ -270,6 +302,7 @@ def run_grid_backtest(
         "worst_trade": round(min((b["profit"] for b in baskets), default=0.0), 2),
         "best_trade": round(max((b["profit"] for b in baskets), default=0.0), 2),
         "max_positions_open": max_positions_seen,
+        "daily_target_halts": daily_target_halts,
         "equity_curve": equity_curve,
         "trades": baskets,
     }

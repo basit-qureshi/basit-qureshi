@@ -7,12 +7,12 @@ export default function StatusBar({ status, onStart, onStop, onModeChange, busy 
 
   if (!status) return null;
 
-  const { running, mode, connected, symbol, timeframe, last_error, strategy_name } = status;
+  const { running, mode, connected, symbol, timeframe, last_error, strategy_name, daily_target_hit } = status;
 
   // Named by the engine from the strategy object it is actually holding, not
   // from the settings dict — so a saved setting that quietly disagrees with the
   // dashboard shows up here instead of only in the shape of the trades.
-  const STRATEGY_LABELS = { SmcStrategy: "SMC" };
+  const STRATEGY_LABELS = { GridEngine: "Grid" };
   const strategyLabel = STRATEGY_LABELS[strategy_name] || strategy_name;
 
   function handleModeToggle() {
@@ -51,6 +51,7 @@ export default function StatusBar({ status, onStart, onStop, onModeChange, busy 
         <span className={`badge ${mode === "real" ? "badge-real" : "badge-demo"}`}>
           {mode === "real" ? "REAL MONEY" : "DEMO"}
         </span>
+        {daily_target_hit && <span className="tone-green">✓ Daily target reached — halted for this broker day</span>}
         {last_error && <span className="error-text">⚠ {last_error}</span>}
       </div>
       <div className="status-right">

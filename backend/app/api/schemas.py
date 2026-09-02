@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 class StartRequest(BaseModel):
@@ -14,6 +14,7 @@ class SettingsUpdate(BaseModel):
     grid_sell_stop_levels: int | None = None
     grid_distance: float | None = None
     grid_basket_take_profit_usd: float | None = None
+    grid_daily_profit_target_usd: float | None = None
     grid_basket_stop_loss_usd: float | None = None
     grid_max_open_positions: int | None = None
     grid_max_daily_loss_usd: float | None = None
@@ -21,6 +22,17 @@ class SettingsUpdate(BaseModel):
     grid_magic_number: int | None = None
     grid_trading_start_hour: int | None = None
     grid_trading_end_hour: int | None = None
+    timezone: str | None = None
+
+
+    @field_validator("grid_daily_profit_target_usd")
+    @classmethod
+    def _target_not_negative(cls, v):
+        # Zero disables the target; a negative one would halt trading the moment
+        # the day opened, which is never what anyone means.
+        if v is not None and v < 0:
+            raise ValueError("Daily profit target cannot be negative (use 0 to switch it off)")
+        return v
 
 
 class ModeUpdate(BaseModel):
@@ -44,6 +56,7 @@ class BacktestRequest(BaseModel):
     sell_stop_levels: int = 10
     grid_distance: float = 0.30
     basket_take_profit_usd: float = 10.0
+    daily_profit_target_usd: float = 0.0
     basket_stop_loss_usd: float = 0.0
     # Leaving this at 0 makes the result fiction: the grid pays a spread on
     # every single fill, and gold's is 24-30 points.

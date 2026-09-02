@@ -1,3 +1,4 @@
+import { formatTime } from "../time";
 export default function TradesTable({ trades }) {
   return (
     <div className="panel">
@@ -41,7 +42,7 @@ export default function TradesTable({ trades }) {
                   {t.profit == null ? "—" : `$${t.profit.toFixed(2)}`}
                 </td>
                 <td>{t.mode}</td>
-                <td>{t.open_time ? new Date(t.open_time).toLocaleString() : "—"}</td>
+                <td>{t.open_time ? formatTime(t.open_time) : "—"}</td>
               </tr>
             ))}
           </tbody>

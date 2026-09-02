@@ -207,6 +207,19 @@ export default function App() {
                 {grid.baskets_stopped > 0 ? ` · ${grid.baskets_stopped} stopped out` : ""}
               </p>
               {grid.last_event && <p className="muted">Last: {grid.last_event}</p>}
+              {grid.daily_target > 0 && (
+                <p className={grid.daily_target_hit ? "tone-green" : "muted"}>
+                  Daily target: <b>${(grid.today_net_profit_usd ?? 0).toFixed(2)}</b> of $
+                  {grid.daily_target.toFixed(2)}
+                  {grid.trading_day ? ` · broker day ${grid.trading_day}` : ""}
+                </p>
+              )}
+              {grid.daily_target_hit && (
+                <p className="tone-green">
+                  ✓ Daily profit target reached: trading halted for this broker day
+                </p>
+              )}
+              {grid.waiting_reason && <p className="muted">⏳ {grid.waiting_reason}</p>}
               {grid.hedged && (
                 <p className="error-text">
                   ⚠ Basket fully hedged. Buys and sells now cancel out, so its profit is frozen at $

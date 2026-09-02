@@ -31,8 +31,11 @@ import logging
 from datetime import date, datetime, timezone
 from typing import Callable, Optional
 
+from zoneinfo import ZoneInfo
+
+from app import db as db_module
 from app.brokers.base import BrokerAdapter, PendingType, Position
-from app.db import SessionLocal, TradeRecord
+from app.db import TradeRecord
 
 logger = logging.getLogger("grid_engine")
 
@@ -56,6 +59,8 @@ class GridEngine:
         trading_start_hour: int = 0,
         trading_end_hour: int = 24,
         poll_interval_seconds: int = 5,
+        daily_profit_target_usd: float = 0.0,
+        timezone_name: str = "Asia/Karachi",
         on_update: Optional[Callable[[dict], None]] = None,
     ):
         self.broker = broker
@@ -74,6 +79,13 @@ class GridEngine:
         self.trading_start_hour = trading_start_hour
         self.trading_end_hour = trading_end_hour
         self.poll_interval_seconds = poll_interval_seconds
+        self.daily_profit_target_usd = daily_profit_target_usd
+        self.timezone_name = timezone_name
+        try:
+            self._tz = ZoneInfo(timezone_name)
+        except Exception:
+            logger.warning("unknown timezone %r — falling back to UTC", timezone_name)
+            self._tz = ZoneInfo("UTC")
         self.on_update = on_update
 
         self._running = False
@@ -86,10 +98,16 @@ class GridEngine:
         self._halt_reason: str | None = None
         self._known_tickets: set[str] = set()
         self._hedge_warned: int | None = None
-        # The M1 candle a basket was closed on. The next grid waits for a candle
-        # after it, so orders are never placed back onto the same candle whose
-        # move just produced the profit.
-        self._closed_on_candle = None
+        # The strict next-M1-candle gate. `_gate_anchor` is the candle stamp the
+        # engine became ready to build on; no grid is placed until the broker
+        # reports a strictly later one. `_gate_reason` is what armed it, so the
+        # dashboard can say why it is waiting rather than looking stalled.
+        self._gate_anchor = None
+        self._gate_reason: str | None = None
+        self._had_grid = False  # something of ours existed on the previous poll
+        self._trading_day: str | None = None
+        self._daily_target_hit = False
+        self._daily_totals = None
         self._day: date | None = None
         self._day_start_equity: float = 0.0
         self._day_realized: float = 0.0
@@ -111,6 +129,11 @@ class GridEngine:
             self.broker.connect()
         self._running = True
         self._halt_reason = None
+        # Starting does not disturb anything already running. A basket that is
+        # open, or a grid still resting, is picked back up and managed as it
+        # was; the gate is only armed when a fresh grid would be needed.
+        if not self._own_state_exists():
+            self._arm_gate("Bot started")
         self._task = asyncio.create_task(self._loop())
 
     def stop(self) -> None:
@@ -138,8 +161,17 @@ class GridEngine:
         account = self.broker.get_account_info()
         positions = self.broker.get_open_positions(self.symbol, magic=self.magic_number)
         pendings = self.broker.get_pending_orders(self.symbol, magic=self.magic_number)
-        self._roll_day(account.equity)
-        self._record_new_fills(positions)
+        candle = self._current_candle_time()
+        self._roll_day(account.equity, candle)
+        self._record_new_fills(positions, candle)
+
+        # A grid that was there last poll and is gone now, with nothing filled,
+        # was removed outside the bot — deleted by hand in MT5, or expired. The
+        # rebuild goes through the same next-candle gate as any other rebuild
+        # rather than snapping back on the spot.
+        if self._had_grid and not positions and not pendings and self._gate_anchor is None:
+            self._arm_gate("Grid orders removed", candle)
+        self._had_grid = bool(positions or pendings)
 
         basket_profit = round(sum(p.profit or 0.0 for p in positions), 2)
         hedged = self._is_hedged(positions)
@@ -164,12 +196,14 @@ class GridEngine:
             if basket_profit >= self.basket_take_profit_usd:
                 self._close_everything(positions, pendings, f"target reached (+{basket_profit:.2f})")
                 self._baskets_won += 1
+                self._arm_gate("Basket closed")
                 account = self.broker.get_account_info()
                 self._broadcast(account, [], self._current_pendings(), 0.0)
                 return
             if self.basket_stop_loss_usd > 0 and basket_profit <= -self.basket_stop_loss_usd:
                 self._close_everything(positions, pendings, f"basket stop hit ({basket_profit:.2f})")
                 self._baskets_stopped += 1
+                self._arm_gate("Basket closed")
                 account = self.broker.get_account_info()
                 self._broadcast(account, [], self._current_pendings(), 0.0)
                 return
@@ -189,6 +223,20 @@ class GridEngine:
                     logger.exception("failed to cancel pending order %s", o.ticket)
             pendings = self._current_pendings()
 
+        # The daily profit target. It is judged on settled trades for this
+        # exact bot identity, so it reads the same after a restart as it did
+        # before one, and clicking Start again cannot get past it.
+        if self._check_daily_target(pendings):
+            self._broadcast(
+                account, positions, self._current_pendings(), basket_profit,
+                note=(
+                    f"Daily profit target reached: trading halted for this broker day "
+                    f"(${self.daily_net():.2f} of ${self.daily_profit_target_usd:.2f})"
+                ),
+                hedged=hedged,
+            )
+            return
+
         if not self._within_session():
             self._broadcast(
                 account, positions, pendings, basket_profit, note="outside trading session", hedged=hedged
@@ -199,12 +247,20 @@ class GridEngine:
         # Topping up a half-filled grid would keep adding exposure to a basket
         # that is already losing, which is not what the strategy says to do.
         if not positions and not pendings:
-            if self._waiting_for_next_candle():
+            unsettled = self._daily_totals.unsettled if self._daily_totals else 0
+            if unsettled:
                 self._broadcast(
                     account, positions, pendings, basket_profit,
-                    note="basket closed — waiting for the next M1 candle before placing the new grid",
+                    note=(
+                        f"Accounting pending: {unsettled} closed trade(s) have no realized result yet — "
+                        "holding off on a new grid until the day's total is certain"
+                    ),
                     hedged=hedged,
                 )
+                return
+            ready, note = self._gate_status(candle)
+            if not ready:
+                self._broadcast(account, positions, pendings, basket_profit, note=note, hedged=hedged)
                 return
             self._build_grid()
             pendings = self._current_pendings()
@@ -297,7 +353,9 @@ class GridEngine:
             logger.error(self._last_error)
         self._last_basket_event = f"{reason}; realized {realized:+.2f}"
         self._reference_price = None
-        self._closed_on_candle = self._current_candle_time()
+        # The day's realized total has just changed, so the daily target is
+        # re-checked against settled trades before anything else is allowed.
+        self._refresh_daily_totals()
 
     def _is_hedged(self, positions: list[Position]) -> bool:
         """True when the open positions net to zero volume.
@@ -318,31 +376,142 @@ class GridEngine:
         smallest = min(p.volume for p in positions)
         return abs(net) < smallest / 2
 
+    # ------------------------------------------------- next-M1-candle gate
+
     def _current_candle_time(self):
-        """Timestamp of the M1 candle price is currently in, or None if it can't
-        be read. None is treated as "don't block" so a data hiccup can never
-        leave the bot permanently unable to place a grid."""
+        """Timestamp of the M1 candle the broker is currently in, or None.
+
+        None means the broker could not give a usable candle. Every caller
+        treats that as "not allowed to place orders" rather than "carry on":
+        the promise is that a grid never lands on the candle the engine became
+        ready on, and that promise cannot be kept from a guess.
+        """
         try:
             candles = self.broker.get_candles(self.symbol, "M1", 2)
-        except Exception:
-            logger.exception("could not read the current M1 candle")
+        except Exception as exc:
+            logger.warning("could not read the current M1 candle: %s", exc)
             return None
-        return candles.index[-1] if len(candles) else None
+        if candles is None or len(candles) == 0:
+            return None
+        stamp = candles.index[-1]
+        return stamp if stamp is not None else None
 
-    def _waiting_for_next_candle(self) -> bool:
-        """True while the new grid should be held back.
+    def _arm_gate(self, reason: str, candle=None) -> None:
+        """Start waiting for a candle strictly later than the current one.
 
-        A basket closes because price moved far enough on some candle. Placing
-        the next grid on that same candle puts the fresh stop orders right into
-        the move that just finished, so the rebuild waits for a new M1 candle
-        to open first.
+        The anchor is written once. Re-arming on every poll would move the
+        anchor forward each time and the wait would never end.
         """
-        if self._closed_on_candle is None:
+        if self._gate_anchor is not None:
+            return
+        self._gate_anchor = candle if candle is not None else self._current_candle_time()
+        self._gate_reason = reason
+        if self._gate_anchor is None:
+            logger.info("%s: waiting for a readable M1 candle before placing the grid", reason)
+        else:
+            logger.info("%s: waiting for the M1 candle after %s", reason, self._gate_anchor)
+
+    def _gate_status(self, candle) -> tuple[bool, str | None]:
+        """(may build, message). Fails closed on missing candle data."""
+        if candle is None:
+            reason = self._gate_reason or "Waiting"
+            return False, f"{reason}: M1 candle data unavailable — not placing any orders until it returns"
+
+        if self._gate_anchor is None:
+            # Became ready without any event having armed the gate (a first
+            # poll, or a gate cleared by a failed read). Anchor here so the
+            # build still lands on a later candle.
+            self._arm_gate(self._gate_reason or "Bot started", candle)
+
+        if self._gate_anchor is not None and candle <= self._gate_anchor:
+            reason = self._gate_reason or "Waiting"
+            return False, f"{reason}: waiting for the next M1 candle before placing the grid"
+
+        # Confirmed a later candle. Clearing here, before the build, is what
+        # stops several polls inside the new candle each placing a grid.
+        self._gate_anchor = None
+        self._gate_reason = None
+        return True, None
+
+    def _own_state_exists(self) -> bool:
+        """True when this bot already has positions or resting orders."""
+        try:
+            if self.broker.get_open_positions(self.symbol, magic=self.magic_number):
+                return True
+            return bool(self.broker.get_pending_orders(self.symbol, magic=self.magic_number))
+        except Exception:
+            logger.exception("could not read existing bot state")
             return False
-        now_candle = self._current_candle_time()
-        if now_candle is None or now_candle > self._closed_on_candle:
-            self._closed_on_candle = None
+
+    # ----------------------------------------------------- daily accounting
+
+    def _trading_day_for(self, candle) -> str | None:
+        """The broker trading day a candle belongs to, as YYYY-MM-DD.
+
+        Taken from the broker's candle stamp, never from the machine clock, so
+        the engine, the dashboard and the backtester all divide days the same
+        way. Naive stamps are read as UTC and converted to the configured zone.
+        """
+        if candle is None:
+            return None
+        try:
+            stamp = candle.to_pydatetime() if hasattr(candle, "to_pydatetime") else candle
+        except Exception:
+            return None
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        return stamp.astimezone(self._tz).date().isoformat()
+
+    def _refresh_daily_totals(self):
+        if self._trading_day is None:
+            self._daily_totals = None
+            return None
+        self._daily_totals = db_module.daily_totals(self.symbol, self.mode, self.magic_number, self._trading_day)
+        return self._daily_totals
+
+    def daily_net(self) -> float:
+        return self._daily_totals.net if self._daily_totals else 0.0
+
+    def _check_daily_target(self, pendings) -> bool:
+        """True when the day is locked. Blocks all order creation.
+
+        The lock is derived from the settled trades themselves rather than
+        stored as a flag, so it is exactly as true after a restart, a browser
+        refresh or another Start click as it was before.
+        """
+        if self.daily_profit_target_usd <= 0:
+            self._daily_target_hit = False
             return False
+        totals = self._daily_totals or self._refresh_daily_totals()
+        if totals is None:
+            return False
+        # Compared in whole cents so 9.99 does not slip through as 10.00 and
+        # 10.00 is never rejected by a floating-point hair.
+        reached = round(totals.net * 100) >= round(self.daily_profit_target_usd * 100)
+        if not reached:
+            self._daily_target_hit = False
+            return False
+
+        if not self._daily_target_hit:
+            self._daily_target_hit = True
+            logger.info(
+                "daily profit target reached: %.2f of %.2f — halting for broker day %s",
+                totals.net, self.daily_profit_target_usd, self._trading_day,
+            )
+        if pendings:
+            for o in pendings:
+                try:
+                    self.broker.cancel_pending_order(o.ticket)
+                except Exception:
+                    logger.exception("failed to cancel pending order %s at the daily target", o.ticket)
+            leftover = self._current_pendings()
+            if leftover:
+                self._last_error = (
+                    f"{len(leftover)} pending order(s) survived the daily-target cancel — retrying"
+                )
+                logger.error(self._last_error)
+            else:
+                logger.info("all pending orders cancelled for the daily halt")
         return True
 
     def _current_pendings(self):
@@ -353,14 +522,27 @@ class GridEngine:
 
     # ------------------------------------------------------------------ risk
 
-    def _roll_day(self, equity: float) -> None:
-        today = date.today()
-        if self._day != today:
-            self._day = today
+    def _roll_day(self, equity: float, candle) -> None:
+        """Rolls the day on the broker's own candle stamp, not the machine clock.
+
+        On a rollover the daily counters and the daily-target lock reset, and
+        the next-candle gate is armed so the first grid of the new day does not
+        land on the rollover candle itself.
+        """
+        day = self._trading_day_for(candle)
+        if day is not None and day != self._trading_day:
+            first_day = self._trading_day is None
+            self._trading_day = day
+            self._day = None
             self._day_start_equity = equity
             self._day_realized = 0.0
             self._equity_peak = equity
             self._halt_reason = None
+            self._daily_target_hit = False
+            if not first_day:
+                logger.info("new broker trading day %s — daily counters and target lock reset", day)
+                self._arm_gate("New trading day", candle)
+        self._refresh_daily_totals()
         self._equity_peak = max(self._equity_peak, equity)
 
     def _check_risk_limits(self, account, positions, pendings) -> bool:
@@ -397,18 +579,19 @@ class GridEngine:
 
     # ------------------------------------------------------- trade recording
 
-    def _record_new_fills(self, positions: list[Position]) -> None:
+    def _record_new_fills(self, positions: list[Position], candle=None) -> None:
         live = {p.ticket for p in positions}
         for p in positions:
             if p.ticket in self._known_tickets:
                 continue
             self._known_tickets.add(p.ticket)
             logger.info("%s STOP triggered: %s %.2f lots at %.2f", p.side.value, p.ticket, p.volume, p.open_price)
-            with SessionLocal() as session:
+            with db_module.SessionLocal() as session:
                 session.add(
                     TradeRecord(
                         ticket=p.ticket, symbol=p.symbol, side=p.side.value, volume=p.volume,
                         open_price=p.open_price, sl=p.sl, tp=p.tp, mode=self.mode, status="OPEN",
+                        magic=self.magic_number, trading_day=self._trading_day,
                     )
                 )
                 session.commit()
@@ -423,7 +606,7 @@ class GridEngine:
         closed = self._known_tickets - live
         if not closed:
             return
-        with SessionLocal() as session:
+        with db_module.SessionLocal() as session:
             for ticket in closed:
                 record = session.query(TradeRecord).filter_by(ticket=ticket, status="OPEN").first()
                 if record:
@@ -434,8 +617,13 @@ class GridEngine:
                     record.status = "CLOSED"
                     record.close_time = datetime.now(timezone.utc)
                     record.profit = profit
+                    record.magic = self.magic_number
+                    # Stamped at settlement from the broker's candle, so the
+                    # day a trade counts towards never shifts afterwards.
+                    record.trading_day = self._trading_day
                 self._known_tickets.discard(ticket)
             session.commit()
+        self._refresh_daily_totals()
 
     # ------------------------------------------------------------- reporting
 
@@ -475,6 +663,11 @@ class GridEngine:
                     "last_event": self._last_basket_event,
                     "halted": self._halt_reason,
                     "hedged": hedged,
+                    "waiting_reason": note,
+                    "trading_day": self._trading_day,
+                    "daily_target": self.daily_profit_target_usd,
+                    "daily_target_hit": self._daily_target_hit,
+                    **self.daily_summary(),
                 },
             }
         )
@@ -494,4 +687,38 @@ class GridEngine:
             "baskets_won": self._baskets_won,
             "baskets_stopped": self._baskets_stopped,
             "last_basket_event": self._last_basket_event,
+            "timezone": self.timezone_name,
+            "trading_day": self._trading_day,
+            "daily_target": self.daily_profit_target_usd,
+            "daily_target_hit": self._daily_target_hit,
+            "waiting_for_candle": self._gate_anchor is not None or self._gate_reason is not None,
+            "waiting_reason": self._gate_reason,
+            **self.daily_summary(),
+        }
+
+    def daily_summary(self) -> dict:
+        """The day's realized figures, from the one shared accounting source.
+
+        The dashboard and the engine read the same function, so a card on
+        screen cannot disagree with the number the halt was judged on. It
+        resolves the trading day itself when asked while the bot is stopped,
+        so the cards are right before the first tick as well as after it.
+        """
+        totals = self._daily_totals
+        if totals is None:
+            if self._trading_day is None:
+                self._trading_day = self._trading_day_for(self._current_candle_time())
+            totals = self._refresh_daily_totals()
+        if totals is None:
+            return {
+                "today_gross_profit_usd": 0.0,
+                "today_gross_loss_usd": 0.0,
+                "today_net_profit_usd": 0.0,
+                "today_unsettled_trades": 0,
+            }
+        return {
+            "today_gross_profit_usd": totals.gross_profit,
+            "today_gross_loss_usd": totals.gross_loss,
+            "today_net_profit_usd": totals.net,
+            "today_unsettled_trades": totals.unsettled,
         }
