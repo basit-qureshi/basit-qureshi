@@ -86,6 +86,10 @@ class GridEngine:
         self._halt_reason: str | None = None
         self._known_tickets: set[str] = set()
         self._hedge_warned: int | None = None
+        # The M1 candle a basket was closed on. The next grid waits for a candle
+        # after it, so orders are never placed back onto the same candle whose
+        # move just produced the profit.
+        self._closed_on_candle = None
         self._day: date | None = None
         self._day_start_equity: float = 0.0
         self._day_realized: float = 0.0
@@ -160,14 +164,12 @@ class GridEngine:
             if basket_profit >= self.basket_take_profit_usd:
                 self._close_everything(positions, pendings, f"target reached (+{basket_profit:.2f})")
                 self._baskets_won += 1
-                self._build_grid()
                 account = self.broker.get_account_info()
                 self._broadcast(account, [], self._current_pendings(), 0.0)
                 return
             if self.basket_stop_loss_usd > 0 and basket_profit <= -self.basket_stop_loss_usd:
                 self._close_everything(positions, pendings, f"basket stop hit ({basket_profit:.2f})")
                 self._baskets_stopped += 1
-                self._build_grid()
                 account = self.broker.get_account_info()
                 self._broadcast(account, [], self._current_pendings(), 0.0)
                 return
@@ -197,6 +199,13 @@ class GridEngine:
         # Topping up a half-filled grid would keep adding exposure to a basket
         # that is already losing, which is not what the strategy says to do.
         if not positions and not pendings:
+            if self._waiting_for_next_candle():
+                self._broadcast(
+                    account, positions, pendings, basket_profit,
+                    note="basket closed — waiting for the next M1 candle before placing the new grid",
+                    hedged=hedged,
+                )
+                return
             self._build_grid()
             pendings = self._current_pendings()
 
@@ -288,6 +297,7 @@ class GridEngine:
             logger.error(self._last_error)
         self._last_basket_event = f"{reason}; realized {realized:+.2f}"
         self._reference_price = None
+        self._closed_on_candle = self._current_candle_time()
 
     def _is_hedged(self, positions: list[Position]) -> bool:
         """True when the open positions net to zero volume.
@@ -307,6 +317,33 @@ class GridEngine:
         net = sum(p.volume if p.side.value == "BUY" else -p.volume for p in positions)
         smallest = min(p.volume for p in positions)
         return abs(net) < smallest / 2
+
+    def _current_candle_time(self):
+        """Timestamp of the M1 candle price is currently in, or None if it can't
+        be read. None is treated as "don't block" so a data hiccup can never
+        leave the bot permanently unable to place a grid."""
+        try:
+            candles = self.broker.get_candles(self.symbol, "M1", 2)
+        except Exception:
+            logger.exception("could not read the current M1 candle")
+            return None
+        return candles.index[-1] if len(candles) else None
+
+    def _waiting_for_next_candle(self) -> bool:
+        """True while the new grid should be held back.
+
+        A basket closes because price moved far enough on some candle. Placing
+        the next grid on that same candle puts the fresh stop orders right into
+        the move that just finished, so the rebuild waits for a new M1 candle
+        to open first.
+        """
+        if self._closed_on_candle is None:
+            return False
+        now_candle = self._current_candle_time()
+        if now_candle is None or now_candle > self._closed_on_candle:
+            self._closed_on_candle = None
+            return False
+        return True
 
     def _current_pendings(self):
         try:

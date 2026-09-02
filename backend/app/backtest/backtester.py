@@ -15,6 +15,11 @@ Two things are modelled carefully because they decide the answer:
   up bar, the reverse on a down bar) is walked in order rather than assuming
   the best or the worst, because on a grid the order of those events is the
   difference between a winning basket and a losing one.
+
+A basket that closes on a bar leaves the rest of that bar empty: the next grid
+is not built until the following candle opens, which is what the live engine
+does. Rebuilding within the same bar would put fresh stops straight back into
+the move that just paid out.
 """
 
 import pandas as pd
@@ -133,6 +138,10 @@ def run_grid_backtest(
     baskets: list[dict] = []
     equity_curve: list[dict] = []
     basket: _Basket | None = None
+    # Index of the bar a basket was closed on. The next grid waits for a bar
+    # after it, matching the live engine: orders are never placed back onto the
+    # same M1 candle whose move produced the profit.
+    closed_on_bar: int | None = None
     halted_reason: str | None = None
     day = None
     day_realized = 0.0
@@ -176,6 +185,10 @@ def run_grid_backtest(
             continue
 
         if basket is None:
+            if closed_on_bar is not None and i <= closed_on_bar:
+                equity_curve.append({"time": str(when), "equity": balance})
+                continue
+            closed_on_bar = None
             basket = build(float(bar["open"]), when)
 
         # Walk the bar. Each leg of the path can fill stops and can reach the
@@ -202,14 +215,15 @@ def run_grid_backtest(
             target_price = basket.price_for_profit(basket_take_profit_usd, point, spread)
             if target_price is not None and lo <= target_price <= hi:
                 close(basket, target_price, when, "TARGET")
-                basket = build(target_price, when)
-                continue
+                basket, closed_on_bar = None, i
+                break
 
             if basket_stop_loss_usd > 0:
                 stop_price = basket.price_for_profit(-basket_stop_loss_usd, point, spread)
                 if stop_price is not None and lo <= stop_price <= hi:
                     close(basket, stop_price, when, "BASKET_STOP")
-                    basket = build(stop_price, when)
+                    basket, closed_on_bar = None, i
+                    break
 
         floating = basket.profit_at(float(bar["close"]), point, spread) if basket else 0.0
         equity = round(balance + floating, 2)
@@ -223,7 +237,7 @@ def run_grid_backtest(
             halted_reason = f"equity drawdown {drawdown:.1f}%"
         if halted_reason and basket:
             close(basket, float(bar["close"]), when, "RISK_HALT")
-            basket = None
+            basket, closed_on_bar = None, i
 
     wins = [b for b in baskets if b["profit"] > 0]
     losses = [b for b in baskets if b["profit"] <= 0]
