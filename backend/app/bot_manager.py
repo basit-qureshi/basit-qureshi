@@ -1,15 +1,11 @@
 import asyncio
 import json
-from datetime import datetime, timezone
 from pathlib import Path
-
-from sqlalchemy import or_
 
 from app.brokers import get_broker
 from app.brokers.base import BrokerAdapter
 from app.config import settings
-from app import db as db_module
-from app.db import TradeRecord, init_db
+from app.db import init_db
 from app.engine.grid_engine import GridEngine
 
 _SETTINGS_FILE = Path(__file__).resolve().parent.parent / "runtime_settings.json"
@@ -60,16 +56,15 @@ class BotManager:
             return
         try:
             saved = json.loads(_SETTINGS_FILE.read_text())
-        except Exception:
-            return
+        except Exception as exc:
+            raise RuntimeError("Cannot read runtime_settings.json; restore or repair the saved settings") from exc
         self.settings.update({k: v for k, v in saved.items() if k in self.settings})
         self.settings["strategy"] = "grid"
 
-    def _save_persisted_settings(self) -> None:
-        try:
-            _SETTINGS_FILE.write_text(json.dumps(self.settings, indent=2))
-        except Exception:
-            raise
+    def _save_persisted_settings(self, candidate=None) -> None:
+        temporary = _SETTINGS_FILE.with_suffix(".tmp")
+        temporary.write_text(json.dumps(candidate if candidate is not None else self.settings, indent=2))
+        temporary.replace(_SETTINGS_FILE)
 
     def _build_engine(self) -> GridEngine:
         s = self.settings
@@ -123,8 +118,8 @@ class BotManager:
         candidate = {**self.settings, **new_settings}
         if candidate["grid_buy_stop_levels"] + candidate["grid_sell_stop_levels"] > candidate["grid_max_open_positions"]:
             raise RuntimeError("Total grid levels exceed the position cap")
-        self.settings.update(new_settings)
-        self._save_persisted_settings()
+        self._save_persisted_settings(candidate)
+        self.settings = candidate
         self.engine = self._build_engine()
 
     def set_mode(self, mode: str) -> None:
@@ -136,53 +131,11 @@ class BotManager:
             raise RuntimeError("Close the existing basket before changing mode")
         if self.broker.get_account_info().trade_mode != mode:
             raise RuntimeError("Change the actual MT5 account first; this button cannot switch broker accounts")
-        self.settings["mode"] = mode
-        self._save_persisted_settings()
+        candidate = {**self.settings, "mode": mode}
+        self._save_persisted_settings(candidate)
+        self.settings = candidate
         self.engine = self._build_engine()
 
-    def _reconcile_stale_open_trades(self) -> None:
-        """On startup, any DB trade still marked OPEN that the broker no longer
-        reports as open (app restarted while the mock broker's in-memory state
-        was lost, or a real position got closed while the bot was offline) is
-        marked CLOSED so it doesn't linger in the stats forever.
-        """
-        init_db()
-        try:
-            if not self.broker.is_connected():
-                self.broker.connect()
-            live_tickets = {p.ticket for p in self.broker.get_open_positions()}
-        except Exception:
-            return
-        with db_module.SessionLocal() as session:
-            stale = session.query(TradeRecord).filter(TradeRecord.status == "OPEN").all()
-            for record in stale:
-                if record.ticket not in live_tickets:
-                    record.status = "CLOSED"
-                    record.close_time = datetime.now(timezone.utc)
-                    try:
-                        record.profit = self.broker.get_realized_profit(record.ticket)
-                    except Exception:
-                        pass
-            # Also backfill already-CLOSED trades whose profit was never recorded
-            # (None) or was recorded as 0.00 — re-fetching from the broker's deal
-            # history returns the true value either way (a genuinely break-even
-            # trade just gets 0 back again).
-            missing = (
-                session.query(TradeRecord)
-                .filter(
-                    TradeRecord.status == "CLOSED",
-                    or_(TradeRecord.profit.is_(None), TradeRecord.profit == 0),
-                )
-                .all()
-            )
-            for record in missing:
-                try:
-                    profit = self.broker.get_realized_profit(record.ticket)
-                except Exception:
-                    continue
-                if profit is not None:
-                    record.profit = profit
-            session.commit()
 
 
 bot_manager = BotManager()

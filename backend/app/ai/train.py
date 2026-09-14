@@ -11,7 +11,9 @@ from app.ai.gate import FEATURES, features, probabilities
 def train(df, symbol, cost=0.30, horizon=5):
     if len(df) < 3000 or not df.index.is_monotonic_increasing or df.index.has_duplicates:
         raise ValueError("At least 3000 ordered, unique M1 candles are required")
-    if cost <= 0 or horizon < 1:
+    if not isinstance(df.index, pd.DatetimeIndex) or not np.isfinite(df[["high", "low", "close"]].to_numpy()).all() or (df[["high", "low", "close"]] <= 0).any().any():
+        raise ValueError("Valid timestamps and positive finite prices are required")
+    if not np.isfinite(cost) or cost <= 0 or horizon < 1 or horizon > len(df) // 10:
         raise ValueError("Positive transaction cost and horizon required")
     x = features(df)
     move = df["close"].shift(-horizon) - df["close"]
@@ -39,7 +41,7 @@ def train(df, symbol, cost=0.30, horizon=5):
     model = {"version": 1, "symbol": symbol, "features": FEATURES,
              "mean": mean.tolist(), "scale": scale.tolist(), "weights": weights.tolist(),
              "training_end": pd.Timestamp(x.index[train_end - 1]).isoformat(),
-             "evaluation_end": pd.Timestamp(x.index[-1]).isoformat(),
+             "evaluation_end": (pd.Timestamp(df.index[-1]) + pd.Timedelta(minutes=1)).isoformat(),
              "horizon": horizon, "cost_price": cost}
     # Decisions may use holdout results for eligibility: model is only available
     # AFTER the holdout ends, preventing evaluation leakage during replay.

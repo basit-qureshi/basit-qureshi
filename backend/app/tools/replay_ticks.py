@@ -23,6 +23,9 @@ class ReplayBroker(MockBroker):
         self.when = None
         self.bars = {}
         self.counter = 0
+        self.history_sync_interval = 0
+        self.history = []
+        self.closed_times = {}
 
     def step(self, row):
         self.when, self.bid, self.ask = row.time, float(row.bid), float(row.ask)
@@ -31,10 +34,13 @@ class ReplayBroker(MockBroker):
         mid = (self.bid + self.ask) / 2
         if stamp not in self.bars:
             self.bars[stamp] = [mid, mid, mid, mid, 1]
+            if len(self.bars) > 512:
+                self.bars.pop(next(iter(self.bars)))
         else:
             bar = self.bars[stamp]
             bar[1], bar[2], bar[3], bar[4] = max(bar[1], mid), min(bar[2], mid), mid, bar[4] + 1
         self._trigger_pending()  # Broker fills happen on every tick, independently of polling.
+        self._check_sl_tp()
 
     def get_candles(self, symbol, timeframe, count):
         return pd.DataFrame.from_dict(self.bars, orient="index",
@@ -64,19 +70,43 @@ class ReplayBroker(MockBroker):
             key = str(self.counter)
             self._positions[key] = Position(
                 key, order.symbol, OrderSide.BUY if buy else OrderSide.SELL, order.volume,
-                self.ask if buy else self.bid, 0, 0, self.when.isoformat(), 0,
+                self.ask if buy else self.bid, order.price - 5 if buy else order.price + 5,
+                0, self.when.isoformat(), 0,
                 self._pending_magic.pop(ticket))
             self._pending.pop(ticket)
 
+    def _check_sl_tp(self):
+        for key, position in list(self._positions.items()):
+            if ((position.side == OrderSide.BUY and self.bid <= position.sl)
+                    or (position.side == OrderSide.SELL and self.ask >= position.sl)):
+                self.close_position(key)
+
     def close_position(self, ticket):
+        position = self._positions.get(ticket)
         result = super().close_position(ticket)
+        if position:
+            self.closed_times[ticket] = self.when.to_pydatetime()
+            self.history.append({
+                "ticket": ticket, "symbol": position.symbol, "side": position.side.value,
+                "volume": position.volume, "open_price": position.open_price,
+                "open_time": datetime.fromisoformat(position.open_time),
+                "close_time": self.closed_times[ticket], "profit": round(result, 2),
+            })
         return result
 
     def get_settlement_time(self, ticket):
-        return self.when.to_pydatetime()
+        return self.closed_times.get(ticket)
+
+    def history_records(self, symbol, magic):
+        return list(self.history)
+
+    def acknowledge_history(self):
+        self.history.clear()
 
 
 def replay(frame, config, balance=1000.0, contract_size=100.0, model=None):
+    if not np.isfinite([balance, contract_size]).all() or balance <= 0 or contract_size <= 0:
+        raise ValueError("Positive finite balance and contract size required")
     frame = frame.copy()
     frame["time"] = pd.to_datetime(frame["time"], utc=True)
     if frame.empty or not frame["time"].is_monotonic_increasing:
@@ -118,7 +148,7 @@ def replay(frame, config, balance=1000.0, contract_size=100.0, model=None):
                 "remaining_orders": len(broker._pending), "max_positions": max_open,
                 "profit_factor_closed_positions": gains/losses if losses else None,
                 "max_drawdown_percent": worst, "last_error": engine._last_error,
-                "limitations": "Historical replay with actual spread and quote gaps. No broker rejection, latency, margin stop-out, commission or swap simulation. Not proof of live profitability.",
+                "limitations": "Historical replay with actual spread, quote gaps and 5.00-price disaster stops. No broker rejection, latency, broker-specific stop-distance rules, margin stop-out, commission or swap simulation. Not proof of live profitability.",
             }
         finally:
             isolated.dispose()

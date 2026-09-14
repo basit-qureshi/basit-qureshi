@@ -14,8 +14,10 @@ def analyze(path, magic=990022):
     if "profit" not in money:
         raise ValueError("No Profit column found. Export a detailed English broker CSV")
     for col in money:
-        values = df[col].astype(str).str.replace(",", "", regex=False).str.replace("$", "", regex=False)
-        df[col] = pd.to_numeric(values, errors="raise").fillna(0)
+        values = df[col].fillna("0").astype(str).str.strip().str.replace("$", "", regex=False)
+        if values.str.contains(r",\d{1,2}$", regex=True).any():
+            raise ValueError("Decimal-comma monetary format is ambiguous; export decimal-point amounts")
+        df[col] = pd.to_numeric(values.str.replace(",", "", regex=False), errors="raise").fillna(0)
     df["net"] = df[money].sum(axis=1)
     magic_col = next((c for c in ("magic", "magic number") if c in df), None)
     if magic_col:

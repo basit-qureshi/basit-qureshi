@@ -14,6 +14,8 @@ a video, a classifier accuracy score, or a profitable candle backtest.
 * Daily loss uses scoped settled results plus floating loss; drawdown high-water state persists.
 * Trades are scoped to account, symbol and magic. Duplicate legacy records are retained
   as DUPLICATE and excluded from statistics. Legacy records are not guessed into a real account.
+* MT5 imports verified bot positions closed during the preceding seven days on first sync,
+  then follows subsequent deals. Stable position identifiers survive broker ticket changes.
 * Unsettled outcomes are retried. Current basket trigger includes reported commission and swap.
 * Grid exposure exceeding the position cap is rejected before creation.
 * Full grid margin is checked against 80% of free margin on MT5.
@@ -24,6 +26,8 @@ a video, a classifier accuracy score, or a profitable candle backtest.
 * Local server binds to 127.0.0.1 without reload or multiple workers.
 * Candle replay processes one fill/exit event at a time and reports final floating exposure.
 * A real local softmax classifier, chronological training/holdout, and optional entry filter are included.
+
+See [AUDIT.md](AUDIT.md) for findings, evidence and unresolved validation.
 
 ## Strategy and limitations
 
@@ -117,7 +121,8 @@ Set balance and contract size to the account and symbol you are evaluating.
 Replay reads runtime_settings.json and runs GridEngine in a temporary isolated
 database. It processes Bid/Ask quotes and gap fills on every tick while applying
 the configured engine polling interval. It reports ending equity including floating
-loss. It does not simulate broker rejection, latency, commission, swap, or margin
+loss and simulates the 5.00 price disaster stops. It does not simulate broker
+specific stop-distance rules, rejection, latency, commission, swap, or margin
 stop-out, so even positive results require further validation. The dashboard's
 Yahoo gold futures OHLC backtest remains an explicitly labelled approximation.
 

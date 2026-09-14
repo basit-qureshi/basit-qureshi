@@ -1,34 +1,14 @@
-"""XAUUSD M1 pending-order grid.
+"""Pending-order grid with persistent basket risk and an optional trained entry gate.
 
-The cycle, and nothing else:
-
-    build a grid around the current price
-      -> BuyStopLevels BUY STOPs above it, SellStopLevels SELL STOPs below,
-         every one at the same fixed lot
-    -> wait for stops to trigger into positions
-    -> add up the NET profit of every position this bot opened
-    -> the moment that total reaches BasketTakeProfitUSD, close every position
-       and cancel every remaining pending order
-    -> confirm nothing is left over, then build a fresh grid at the new price
-    -> repeat
-
-There are no entry filters, no indicators and no per-trade stop or target: a
-grid position is exited only by the basket rule. That is the strategy as
-specified, and adding anything else would make the thing being tested a
-different strategy.
-
-Understand what that leaves. There is no stop on an individual trade, so a
-basket that never reaches its target simply keeps growing while price runs. At
-0.01 lots a fully triggered 10+10 grid is 0.20 lots, which on gold is $20 of
-profit or loss for every $1 the price moves - so an $18 move against a
-one-sided grid is around $360. The only things that end a losing basket are
-max_daily_loss_usd and max_equity_drawdown_percent, and the optional
-basket_stop_loss_usd. They are the whole risk model, not decoration.
+MT5 applies a separate disaster stop to each order. Basket exits still depend
+on polling, broker execution and actual costs. These controls do not establish
+that the grid or its classifier has a profitable edge.
 """
 
 import asyncio
 import logging
 import threading
+import time
 from datetime import date, datetime, timezone
 from typing import Callable, Optional
 
@@ -70,6 +50,8 @@ class GridEngine:
         self._closing_reason = None
         self._stop_after_close = False
         self.ai_gate = None
+        self._last_history_sync = 0.0
+        self._history_ready = False
         self.broker = broker
         self.symbol = symbol
         self.mode = mode
@@ -140,15 +122,19 @@ class GridEngine:
         if not self.broker.is_connected():
             self.broker.connect()
         self._validate_account(self.broker.get_account_info())
-        self._running = True
+        if not self._closing_reason:
+            self._stop_after_close = False
         # Starting does not disturb anything already running. A basket that is
         # open, or a grid still resting, is picked back up and managed as it
         # was; the gate is only armed when a fresh grid would be needed.
         if not self._own_state_exists():
             self._arm_gate("Bot started")
+        self._running = True
         self._task = asyncio.create_task(self._loop())
 
     def stop(self) -> None:
+        if not self.broker.is_connected():
+            self.broker.connect()
         self._stop_after_close = True
         self._closing_reason = "User requested stop"
         self._persist_risk()
@@ -175,17 +161,26 @@ class GridEngine:
         self._validate_account(account)
         positions = self.broker.get_open_positions(self.symbol, magic=self.magic_number)
         pendings = self.broker.get_pending_orders(self.symbol, magic=self.magic_number)
-        candle = self._current_candle_time()
-        self._roll_day(account.equity, candle)
-        self._record_new_fills(positions, candle)
-        self._settle_closed_trades()
         if self._closing_reason:
             self._close_everything(positions, pendings, self._closing_reason)
             if self._closing_reason is None:
                 self._arm_gate("Basket closed")
                 if self._stop_after_close:
                     self._running = False
+            self._broadcast_current()
             return
+
+        candle = self._current_candle_time()
+        accounting_ok = True
+        try:
+            self._roll_day(account.equity, candle)
+            self._record_new_fills(positions, candle)
+            self._settle_closed_trades()
+            self._sync_broker_history()
+        except Exception as exc:
+            accounting_ok = False
+            self._last_error = f"Accounting unavailable: {exc}; new grids blocked"
+            logger.exception("Accounting synchronization failed; exits remain enabled")
 
         # A grid that was there last poll and is gone now, with nothing filled,
         # was removed outside the bot — deleted by hand in MT5, or expired. The
@@ -196,38 +191,35 @@ class GridEngine:
         self._had_grid = bool(positions or pendings)
 
         basket_profit = round(sum(p.net_profit for p in positions), 2)
-        hedged = self._is_hedged(positions)
+        hedged = self._is_hedged(positions) and not pendings
         if hedged and self._hedge_warned != len(positions):
             self._hedge_warned = len(positions)
             logger.warning(
-                "basket is fully hedged: %d positions net to zero, so its profit is frozen at %.2f "
-                "and the %.2f target can no longer be reached by any price. Only the basket stop, "
-                "the daily loss limit or the drawdown limit will end it.",
+                "basket has zero net volume: %d positions, reported profit %.2f, target %.2f. "
+                "Directional price movement alone cannot recover it; spread, costs and stops still matter.",
                 len(positions), basket_profit, self.basket_take_profit_usd,
             )
         elif not hedged:
             self._hedge_warned = None
 
         if self._check_risk_limits(account, positions, pendings):
-            self._broadcast(account, positions, pendings, basket_profit, hedged=hedged)
+            self._broadcast_current()
             return
 
         if positions:
             # The target is a floor, not a window: the spec is explicit that a
             # basket at 9.99 stays open and one at 10.00 or better closes.
-            if basket_profit >= self.basket_take_profit_usd:
+            if all(p.costs_known for p in positions) and basket_profit >= self.basket_take_profit_usd:
                 self._close_everything(positions, pendings, f"target reached (+{basket_profit:.2f})")
-                self._baskets_won += 1
-                self._arm_gate("Basket closed")
-                account = self.broker.get_account_info()
-                self._broadcast(account, [], self._current_pendings(), 0.0)
+                if not self._closing_reason:
+                    self._arm_gate("Basket closed")
+                self._broadcast_current()
                 return
             if self.basket_stop_loss_usd > 0 and basket_profit <= -self.basket_stop_loss_usd:
                 self._close_everything(positions, pendings, f"basket stop hit ({basket_profit:.2f})")
-                self._baskets_stopped += 1
-                self._arm_gate("Basket closed")
-                account = self.broker.get_account_info()
-                self._broadcast(account, [], self._current_pendings(), 0.0)
+                if not self._closing_reason:
+                    self._arm_gate("Basket closed")
+                self._broadcast_current()
                 return
 
         # Cap exposure by pulling the rest of the grid once enough of it has
@@ -244,6 +236,10 @@ class GridEngine:
                 except Exception:
                     logger.exception("failed to cancel pending order %s", o.ticket)
             pendings = self._current_pendings()
+
+        if not accounting_ok:
+            self._broadcast(account, positions, pendings, basket_profit, note=self._last_error)
+            return
 
         # The daily profit target. It is judged on settled trades for this
         # exact bot identity, so it reads the same after a restart as it did
@@ -363,7 +359,10 @@ class GridEngine:
                 logger.exception("Cancellation failed; will retry")
         pendings = self._current_pendings()
         positions = self.broker.get_open_positions(self.symbol, magic=self.magic_number)
-        self._record_new_fills(positions)
+        try:
+            self._record_new_fills(positions)
+        except Exception:
+            logger.exception("Could not record fills before closure; broker history will retry")
         for p in positions:
             try:
                 realized += self.broker.close_position(p.ticket) or 0.0
@@ -376,11 +375,18 @@ class GridEngine:
                 logger.exception("failed to cancel pending order %s", o.ticket)
 
         self._day_realized += realized
-        self._settle_closed_trades()
+        try:
+            self._settle_closed_trades()
+        except Exception:
+            logger.exception("Settlement unavailable after closure; will retry")
 
         leftover_positions = self.broker.get_open_positions(self.symbol, magic=self.magic_number)
         leftover_orders = self.broker.get_pending_orders(self.symbol, magic=self.magic_number)
         if leftover_positions or leftover_orders:
+            try:
+                self._record_new_fills(leftover_positions)
+            except Exception:
+                logger.exception("Could not record leftover fills; broker history will retry")
             # Retry once: a stop can fill in the moment between closing and
             # cancelling, which leaves a position the first pass never saw.
             for p in leftover_positions:
@@ -393,7 +399,10 @@ class GridEngine:
                     self.broker.cancel_pending_order(o.ticket)
                 except Exception:
                     logger.exception("failed to cancel leftover order %s", o.ticket)
-            self._settle_closed_trades()
+            try:
+                self._settle_closed_trades()
+            except Exception:
+                logger.exception("Settlement unavailable after retry")
 
         still_there = self.broker.get_open_positions(self.symbol, magic=self.magic_number)
         if still_there:
@@ -401,26 +410,22 @@ class GridEngine:
             logger.error(self._last_error)
         if not still_there and not self._current_pendings():
             self._closing_reason = None
+            if reason.startswith("target reached"):
+                self._baskets_won += 1
+            elif reason.startswith("basket stop hit"):
+                self._baskets_stopped += 1
         self._persist_risk()
         self._last_basket_event = f"{reason}; settlement pending verification"
         self._reference_price = None
         # The day's realized total has just changed, so the daily target is
         # re-checked against settled trades before anything else is allowed.
-        self._refresh_daily_totals()
+        try:
+            self._refresh_daily_totals()
+        except Exception:
+            logger.exception("Daily accounting update pending")
 
     def _is_hedged(self, positions: list[Position]) -> bool:
-        """True when the open positions net to zero volume.
-
-        This is the dead end built into a two-sided grid, and it is worth
-        naming plainly: with equal buy and sell volume the price terms cancel,
-        so the basket's profit stops responding to price at all. It is frozen
-        at the sum of the sell entries minus the buy entries, less the spread
-        paid to open them — and since the buys filled above the reference and
-        the sells below it, that frozen number is always a loss. A full 10+10
-        grid at 0.30 spacing locks in about -$37.80 and no price, in either
-        direction, ever recovers it. The take-profit target simply cannot be
-        reached from here.
-        """
+        """Zero net volume removes directional sensitivity, but costs can change."""
         if not positions:
             return False
         net = sum(p.volume if p.side.value == "BUY" else -p.volume for p in positions)
@@ -581,12 +586,14 @@ class GridEngine:
             self._equity_peak = saved.get("peak", account.equity)
             self._halt_reason = saved.get("halt")
             self._closing_reason = self._closing_reason or saved.get("closing")
+            self._stop_after_close = self._stop_after_close or saved.get("stop_after_close", False)
 
     def _persist_risk(self):
         if self._risk_key:
             db_module.save_risk(self._risk_key, {
                 "day": self._trading_day, "peak": self._equity_peak,
                 "halt": self._halt_reason, "closing": self._closing_reason,
+                "stop_after_close": self._stop_after_close,
             })
 
     # ------------------------------------------------------------------ risk
@@ -617,13 +624,15 @@ class GridEngine:
         self._persist_risk()
 
     def _check_risk_limits(self, account, positions, pendings) -> bool:
-        """The whole risk model. A grid has no per-trade stop, so if these do not
-        fire nothing else will. Returns True when trading is halted."""
+        """Check basket/account loss limits, including during history outages."""
         drawdown = 0.0
         if self._equity_peak > 0:
             drawdown = (self._equity_peak - account.equity) / self._equity_peak * 100
 
-        self._refresh_daily_totals()
+        try:
+            self._refresh_daily_totals()
+        except Exception:
+            logger.exception("Using last known daily total; account and basket exits remain enabled")
         self._day_realized = self.daily_net()
         daily_with_floating = self._day_realized + sum(p.net_profit for p in positions)
         reason = None
@@ -647,7 +656,12 @@ class GridEngine:
     def _within_session(self) -> bool:
         if self.trading_start_hour == 0 and self.trading_end_hour >= 24:
             return True
-        hour = datetime.now(timezone.utc).hour
+        stamp = self._current_candle_time()
+        if stamp is None:
+            return False
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        hour = stamp.astimezone(timezone.utc).hour
         if self.trading_start_hour <= self.trading_end_hour:
             return self.trading_start_hour <= hour < self.trading_end_hour
         return hour >= self.trading_start_hour or hour < self.trading_end_hour  # window crosses midnight
@@ -655,28 +669,30 @@ class GridEngine:
     # ------------------------------------------------------- trade recording
 
     def _record_new_fills(self, positions: list[Position], candle=None) -> None:
-        live = {p.ticket for p in positions}
+        live = {p.identifier or p.ticket for p in positions}
         for p in positions:
-            if p.ticket in self._known_tickets:
+            key = p.identifier or p.ticket
+            if key in self._known_tickets:
                 continue
             logger.info("%s STOP triggered: %s %.2f lots at %.2f", p.side.value, p.ticket, p.volume, p.open_price)
             with db_module.SessionLocal() as session:
                 existing = session.query(TradeRecord).filter_by(
-                    account_id=self._account_id, ticket=p.ticket
+                    account_id=self._account_id, ticket=key
                 ).filter(TradeRecord.status != "DUPLICATE").first()
                 if existing:
-                    self._known_tickets.add(p.ticket)
+                    self._known_tickets.add(key)
                     continue
                 session.add(
                     TradeRecord(
                         account_id=self._account_id,
-                        ticket=p.ticket, symbol=p.symbol, side=p.side.value, volume=p.volume,
+                        ticket=key, symbol=p.symbol, side=p.side.value, volume=p.volume,
                         open_price=p.open_price, sl=p.sl, tp=p.tp, mode=self.mode, status="OPEN",
+                        open_time=datetime.fromisoformat(p.open_time),
                         magic=self.magic_number, trading_day=self._trading_day,
                     )
                 )
                 session.commit()
-                self._known_tickets.add(p.ticket)
+                self._known_tickets.add(key)
         gone = self._known_tickets - live
         if gone:
             self._settle_closed_trades()
@@ -684,7 +700,7 @@ class GridEngine:
     def _settle_closed_trades(self) -> None:
         """Marks tickets the broker no longer reports as open, using the broker's
         own realized figure so the dashboard matches the account history."""
-        live = {p.ticket for p in self.broker.get_open_positions(self.symbol, magic=self.magic_number)}
+        live = {p.identifier or p.ticket for p in self.broker.get_open_positions(self.symbol, magic=self.magic_number)}
         with db_module.SessionLocal() as session:
             pending = session.query(TradeRecord).filter(
                 TradeRecord.account_id == self._account_id,
@@ -715,7 +731,39 @@ class GridEngine:
             session.commit()
         self._refresh_daily_totals()
 
+    def _sync_broker_history(self):
+        if not hasattr(self.broker, "history_records") or (self._history_ready and time.monotonic() - self._last_history_sync < getattr(self.broker, "history_sync_interval", 30)):
+            return
+        rows = self.broker.history_records(self.symbol, self.magic_number)
+        with db_module.SessionLocal() as session:
+            for item in rows:
+                record = session.query(TradeRecord).filter_by(
+                    account_id=self._account_id, ticket=item["ticket"]
+                ).filter(TradeRecord.status != "DUPLICATE").first()
+                if record is None:
+                    record = TradeRecord(account_id=self._account_id, mode=self.mode,
+                                         magic=self.magic_number, sl=0, tp=0, **item)
+                    session.add(record)
+                else:
+                    for name, value in item.items():
+                        setattr(record, name, value)
+                record.status = "CLOSED"
+                record.trading_day = self._trading_day_for(item["close_time"])
+            session.commit()
+        if hasattr(self.broker, "acknowledge_history"):
+            self.broker.acknowledge_history()
+        self._history_ready = True
+        self._last_history_sync = time.monotonic()
+        self._refresh_daily_totals()
+
     # ------------------------------------------------------------- reporting
+
+    def _broadcast_current(self):
+        positions = self.broker.get_open_positions(self.symbol, magic=self.magic_number)
+        pendings = self._current_pendings()
+        self._broadcast(self.broker.get_account_info(), positions, pendings,
+                        round(sum(p.net_profit for p in positions), 2),
+                        hedged=self._is_hedged(positions) and not pendings)
 
     def _broadcast(
         self, account, positions, pendings, basket_profit: float, note: str | None = None,

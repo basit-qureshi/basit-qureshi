@@ -21,10 +21,28 @@ class SettingsUpdate(BaseModel):
     grid_max_daily_loss_usd: float | None = Field(None, ge=0, le=100000)
     grid_max_equity_drawdown_percent: float | None = Field(None, ge=0, le=100)
     grid_magic_number: int | None = Field(None, ge=1, le=2147483647)
-    grid_trading_start_hour: int | None = None
-    grid_trading_end_hour: int | None = None
+    grid_trading_start_hour: int | None = Field(None, ge=0, le=23)
+    grid_trading_end_hour: int | None = Field(None, ge=0, le=24)
     timezone: str | None = None
 
+
+    @field_validator("timezone")
+    @classmethod
+    def _timezone_valid(cls, value):
+        if value is not None:
+            from zoneinfo import ZoneInfo
+            try:
+                ZoneInfo(value)
+            except Exception as exc:
+                raise ValueError("Unknown timezone") from exc
+        return value
+
+    @field_validator("timeframe")
+    @classmethod
+    def _m1_only(cls, value):
+        if value is not None and value != "M1":
+            raise ValueError("The grid and AI currently require M1")
+        return value
 
     @field_validator("grid_daily_profit_target_usd")
     @classmethod

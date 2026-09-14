@@ -53,6 +53,8 @@ class Position:
     magic: int = 0  # which program opened it; 0 means unknown/manual
     swap: float = 0.0
     commission: float = 0.0
+    identifier: str | None = None
+    costs_known: bool = True
 
     @property
     def net_profit(self):

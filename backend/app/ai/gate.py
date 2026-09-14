@@ -45,6 +45,7 @@ class AIGate:
 
     def allow(self, broker, symbol):
         self.direction = "BOTH"
+        self.probability = None
         if self.mode == "off":
             self.reason = "AI disabled"
             return True

@@ -93,7 +93,7 @@ def get_stats():
         # toward the total but not toward wins/losses/win-rate.
         decided = [r for r in closed if r.profit is not None]
         wins = [r for r in decided if r.profit > 0]
-        losses = [r for r in decided if r.profit <= 0]
+        losses = [r for r in decided if r.profit < 0]
         total_profit = sum(r.profit or 0 for r in closed)
         gross_profit = sum(r.profit for r in wins)
         gross_loss = abs(sum(r.profit for r in losses))

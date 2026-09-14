@@ -1,7 +1,7 @@
 import threading
 import time
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from functools import wraps
 
 import pandas as pd
@@ -127,7 +127,7 @@ class MT5Broker(BrokerAdapter):
         tick = mt5.symbol_info_tick(symbol)
         spread = (tick.ask - tick.bid) if tick else 0.0
         spread_based_distance = spread / 2 + info.point * 5
-        min_stop_distance = max(stops_level_distance, spread_based_distance)
+        min_stop_distance = max(stops_level_distance + spread / 2, spread_based_distance)
         return SymbolInfo(
             symbol=symbol,
             pip_size=pip_size,
@@ -173,9 +173,7 @@ class MT5Broker(BrokerAdapter):
                 continue
             side = OrderSide.BUY if p.type == mt5.POSITION_TYPE_BUY else OrderSide.SELL
             deals = mt5.history_deals_get(position=p.identifier)
-            if deals is None:
-                raise RuntimeError("Position costs unavailable; new entries blocked")
-            costs = sum(d.commission + getattr(d, "fee", 0.0) for d in deals)
+            costs = sum(d.commission + getattr(d, "fee", 0.0) for d in (deals or []))
             result.append(
                 Position(
                     ticket=str(p.ticket),
@@ -187,7 +185,8 @@ class MT5Broker(BrokerAdapter):
                     tp=p.tp,
                     open_time=datetime.fromtimestamp(p.time, tz=timezone.utc).isoformat(),
                     profit=p.profit,
-                    magic=p.magic, swap=p.swap, commission=costs,
+                    magic=p.magic, swap=p.swap, commission=costs, identifier=str(p.identifier),
+                    costs_known=bool(deals),
                 )
             )
         return result
@@ -217,10 +216,16 @@ class MT5Broker(BrokerAdapter):
         if not info.volume_min <= volume <= info.volume_max or abs(volume / info.volume_step - round(volume / info.volume_step)) > 1e-6:
             raise ValueError("Invalid volume for this broker symbol")
         mt5_type = mt5.ORDER_TYPE_BUY_STOP if order_type == PendingType.BUY_STOP else mt5.ORDER_TYPE_SELL_STOP
+        distance = max(5.0, info.trade_stops_level * info.point + step)
+        sl_round = math.floor if order_type == PendingType.BUY_STOP else math.ceil
+        raw_sl = price - distance if order_type == PendingType.BUY_STOP else price + distance
+        stop = round(sl_round(raw_sl / step) * step, info.digits)
+        if stop <= 0:
+            raise ValueError("Disaster stop is invalid for this symbol")
         request = {
             "action": mt5.TRADE_ACTION_PENDING,
             # Disaster protection remains at the broker if the Python process stops.
-            "sl": round(price - max(5.0, info.trade_stops_level * info.point + step) if order_type == PendingType.BUY_STOP else price + max(5.0, info.trade_stops_level * info.point + step), info.digits),
+            "sl": stop,
             "symbol": symbol,
             "volume": volume,
             "type": mt5_type,
@@ -407,3 +412,36 @@ class MT5Broker(BrokerAdapter):
             raise RuntimeError("Cannot calculate grid margin")
         if buy * buy_levels + sell * sell_levels > account.margin_free * 0.8:
             raise RuntimeError("Complete grid would consume more than 80% of free margin")
+
+    @_synchronized
+    def history_records(self, symbol, magic):
+        now = datetime.now(timezone.utc)
+        since = getattr(self, "_history_cursor", None) or now - timedelta(days=7)
+        raw = self._mt5.history_deals_get(since - timedelta(seconds=60), now)
+        if raw is None:
+            raise RuntimeError("Cannot synchronize broker history")
+        rows = []
+        for identifier in {d.position_id for d in raw if d.symbol == symbol and d.position_id}:
+            full = self._mt5.history_deals_get(position=identifier)
+            if full is None:
+                raise RuntimeError("Incomplete deal history")
+            entries = [d for d in full if d.entry == self._mt5.DEAL_ENTRY_IN]
+            if not entries or any(d.magic != magic for d in entries):
+                continue
+            exits = [d for d in full if d.entry in (self._mt5.DEAL_ENTRY_OUT, self._mt5.DEAL_ENTRY_OUT_BY)]
+            if not exits or sum(d.volume for d in exits) + 1e-8 < sum(d.volume for d in entries):
+                continue
+            profit = round(sum(d.profit + d.commission + d.swap + getattr(d, "fee", 0.0) for d in full), 2)
+            first = min(entries, key=lambda d: d.time_msc)
+            rows.append({
+                "ticket": str(identifier), "symbol": symbol,
+                "side": "BUY" if first.type == self._mt5.DEAL_TYPE_BUY else "SELL",
+                "volume": sum(d.volume for d in entries), "open_price": first.price,
+                "open_time": datetime.fromtimestamp(first.time_msc/1000, timezone.utc),
+                "close_time": datetime.fromtimestamp(max(d.time_msc for d in exits)/1000, timezone.utc), "profit": profit,
+            })
+        self._history_pending_cursor = now
+        return rows
+
+    def acknowledge_history(self):
+        self._history_cursor = self._history_pending_cursor
