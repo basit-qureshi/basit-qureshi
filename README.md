@@ -43,7 +43,7 @@ against the same strategy with the filter disabled.
 
 Do not assume old MAX_OPEN_TRADES, MAX_DAILY_LOSS_PERCENT, RISK_PERCENT,
 STOP_LOSS_PIPS or TAKE_PROFIT_PIPS fields control the grid.
-Use GRID_MAX_OPEN_POSITIONS, GRID_MAX_DAILY_LOSS_USD,
+This build supports XAUUSD broker symbols on M1. Use GRID_MAX_OPEN_POSITIONS, GRID_MAX_DAILY_LOSS_USD,
 GRID_BASKET_STOP_LOSS_USD and GRID_MAX_EQUITY_DRAWDOWN_PERCENT.
 Saved backend/runtime_settings.json values override .env grid settings.
 The defaults are not a position-size recommendation for your balance.
@@ -143,7 +143,8 @@ one complete trade. Raw reports and trained models stay in ignored local folders
 The supplied CSV and video could not be opened by the chat's available tools.
 No claim is made that their contents were analyzed, or that manual trades were
 fully separated. Local active settings and MT5 execution have not been verified
-from here. Broker history export, quote data, demo forward results, and the video's
+from here. Partial-position deal allocation across broker days remains a ledger
+limitation; see AUDIT.md. Broker history export, quote data, demo forward results, and the video's
 key frames are still needed for that assessment.
 
 Do not enable ALLOW_REAL_TRADING until you have independently verified account,

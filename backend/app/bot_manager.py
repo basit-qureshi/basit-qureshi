@@ -68,6 +68,8 @@ class BotManager:
 
     def _build_engine(self) -> GridEngine:
         s = self.settings
+        from app.api.schemas import SettingsUpdate
+        SettingsUpdate(**{key: value for key, value in s.items() if key in SettingsUpdate.model_fields})
         engine = GridEngine(
             broker=self.broker,
             symbol=s["symbol"],

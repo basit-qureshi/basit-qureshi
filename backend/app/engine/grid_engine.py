@@ -144,7 +144,7 @@ class GridEngine:
 
     async def _loop(self) -> None:
         try:
-            while self._running:
+            while self._running and self._task is asyncio.current_task():
                 try:
                     self._tick()
                 except Exception as exc:
@@ -157,6 +157,7 @@ class GridEngine:
     # ------------------------------------------------------------------ tick
 
     def _tick(self) -> None:
+        self._last_error = None
         account = self.broker.get_account_info()
         self._validate_account(account)
         positions = self.broker.get_open_positions(self.symbol, magic=self.magic_number)
@@ -641,15 +642,16 @@ class GridEngine:
         elif self.max_equity_drawdown_percent > 0 and drawdown >= self.max_equity_drawdown_percent:
             reason = f"equity drawdown {drawdown:.1f}% reached the {self.max_equity_drawdown_percent:.1f}% limit"
 
+        reason = reason or self._halt_reason
         if reason is None:
-            return self._halt_reason is not None
+            return False
 
         if self._halt_reason is None:
             self._halt_reason = reason
             self._persist_risk()
             logger.warning("risk protection activated: %s — flattening and standing down", reason)
-            # Standing down while positions stay open would leave the account
-            # exposed with nothing watching it, so everything is closed first.
+        # Also recover a crash between persisting a halt and requesting closure.
+        if positions or pendings:
             self._close_everything(positions, pendings, f"risk protection: {reason}")
         return True
 

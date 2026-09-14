@@ -13,7 +13,7 @@ router = APIRouter(prefix="/api")
 
 
 @router.get("/status")
-def get_status():
+async def get_status():
     engine = bot_manager.engine
     account = None
     if engine.broker.is_connected():
@@ -47,7 +47,7 @@ async def stop_bot():
 
 
 @router.get("/trades")
-def get_trades(limit: int = 100):
+async def get_trades(limit: int = 100):
     bot_manager.engine.daily_summary()
     with db_module.SessionLocal() as session:
         records = session.query(TradeRecord).filter_by(
@@ -76,7 +76,7 @@ def get_trades(limit: int = 100):
 
 
 @router.get("/stats")
-def get_stats():
+async def get_stats():
     bot_manager.engine.daily_summary()
     identity = bot_manager.engine._account_id
     with db_module.SessionLocal() as session:
@@ -180,7 +180,7 @@ def get_settings():
 
 
 @router.post("/settings")
-def update_settings(body: SettingsUpdate):
+async def update_settings(body: SettingsUpdate):
     updates = {k: v for k, v in body.model_dump().items() if v is not None}
     try:
         bot_manager.update_settings(updates)
@@ -190,7 +190,7 @@ def update_settings(body: SettingsUpdate):
 
 
 @router.post("/mode")
-def set_mode(body: ModeUpdate):
+async def set_mode(body: ModeUpdate):
     if body.mode not in ("demo", "real"):
         raise HTTPException(status_code=400, detail="mode must be 'demo' or 'real'")
     if body.mode == "real" and not body.confirm:

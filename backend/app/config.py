@@ -51,10 +51,9 @@ class Settings(BaseSettings):
     # means a losing basket is bounded only by the two limits below.
     grid_basket_stop_loss_usd: float = 0.0
     grid_max_open_positions: int = 20
-    # These two are the entire risk model. A grid carries no per-trade stop, so
-    # nothing else ends a basket that keeps going the wrong way. At 0.01 lots a
-    # fully filled 10+10 grid is 0.20 lots, and on gold that is $20 of profit or
-    # loss for every $1 the price moves.
+    # Account/basket limits complement the MT5 disaster stop on each order.
+    # These legacy defaults are not suitable position sizing for every balance.
+    # Gross volume and signed net directional exposure are different quantities.
     grid_max_daily_loss_usd: float = 100.0
     grid_max_equity_drawdown_percent: float = 30.0
     # Tags every order so the bot manages only its own, leaving manual trades

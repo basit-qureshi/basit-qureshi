@@ -119,7 +119,7 @@ export default function App() {
     try {
       await api.stop();
       await refresh();
-      pushToast("info", "Bot stopped", "Closing bot positions and cancelling orders. Wait for broker confirmation.");
+      pushToast("info", "Stop requested", "Closing bot positions and cancelling orders. Wait for broker confirmation.");
     } catch (err) {
       setGlobalError(err.message);
     } finally {

@@ -23,7 +23,7 @@ def analyze(path, magic=990022):
     if magic_col:
         ids = pd.to_numeric(df[magic_col], errors="coerce")
         df["ownership"] = "other_or_unknown"
-        df.loc[ids == 0, "ownership"] = "manual_magic_zero"
+        df.loc[ids == 0, "ownership"] = "magic_zero_unattributed"
         df.loc[ids == magic, "ownership"] = "matching_magic"
     else:
         df["ownership"] = "unclassified"

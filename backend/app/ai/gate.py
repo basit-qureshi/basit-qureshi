@@ -32,6 +32,8 @@ class AIGate:
     def __init__(self, path, mode="shadow", confidence=0.6):
         if mode not in ("off", "shadow", "filter"):
             raise ValueError("AI_MODE must be off, shadow or filter")
+        if not np.isfinite(confidence) or not 0 <= confidence <= 1:
+            raise ValueError("AI_MIN_CONFIDENCE must be between 0 and 1")
         self.path = Path(path)
         self.mode = mode
         self.confidence = confidence

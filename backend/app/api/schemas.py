@@ -26,6 +26,13 @@ class SettingsUpdate(BaseModel):
     timezone: str | None = None
 
 
+    @field_validator("symbol")
+    @classmethod
+    def _gold_symbol(cls, value):
+        if value is not None and not value.upper().startswith("XAUUSD"):
+            raise ValueError("This build requires an XAUUSD broker symbol")
+        return value
+
     @field_validator("timezone")
     @classmethod
     def _timezone_valid(cls, value):

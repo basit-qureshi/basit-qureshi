@@ -268,3 +268,16 @@ def test_replay_stop_fills_between_polls_are_recorded():
     assert not broker._positions
     history = broker.history_records("XAUUSDm", 990022)
     assert len(history) == 1 and history[0]["profit"] == -6.44
+
+
+
+def test_restart_between_risk_halt_and_close_request_still_flattens(broker, engine_factory):
+    broker.open_position("BUY", 4000)
+    first = engine_factory()
+    first._validate_account(broker.get_account_info())
+    first._halt_reason = "equity drawdown previously reached limit"
+    first._persist_risk()
+    restarted = engine_factory()
+    restarted._tick()
+    assert not broker.positions
+    assert restarted._halt_reason

@@ -101,3 +101,9 @@ costs, unseen broker ticks and forward demo results. Compare the same grid with
 and without AI across trends, reversals and spread expansion. Inspect drawdown,
 floating exposure, turnover and execution failures as well as net return.
 Changing parameters or adding a classifier alone cannot guarantee profitability.
+
+Partial position exits are recorded in the position ledger when the whole
+position settles. Allocating each partial deal and overnight charge to its exact
+broker day requires a deal-level ledger; that is a remaining accounting limitation
+for partially closed or multi-day positions. Account equity drawdown still applies
+to the whole account, including manual activity, while bot trade statistics are scoped.
