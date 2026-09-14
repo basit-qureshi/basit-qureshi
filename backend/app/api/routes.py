@@ -35,6 +35,8 @@ async def start_bot(body: StartRequest):
         bot_manager.engine.start(confirm_real=body.confirm_real)
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     return {"ok": True}
 
 
@@ -46,8 +48,12 @@ async def stop_bot():
 
 @router.get("/trades")
 def get_trades(limit: int = 100):
+    bot_manager.engine.daily_summary()
     with db_module.SessionLocal() as session:
-        records = session.query(TradeRecord).order_by(TradeRecord.open_time.desc()).limit(limit).all()
+        records = session.query(TradeRecord).filter_by(
+            account_id=bot_manager.engine._account_id, symbol=bot_manager.engine.symbol,
+            magic=bot_manager.engine.magic_number, mode=bot_manager.engine.mode,
+        ).filter(TradeRecord.status != "DUPLICATE").order_by(TradeRecord.open_time.desc()).limit(max(1, min(limit, 1000))).all()
         return [
             {
                 "id": r.id,
@@ -71,9 +77,15 @@ def get_trades(limit: int = 100):
 
 @router.get("/stats")
 def get_stats():
+    bot_manager.engine.daily_summary()
+    identity = bot_manager.engine._account_id
     with db_module.SessionLocal() as session:
-        closed = session.query(TradeRecord).filter(TradeRecord.status == "CLOSED").all()
-        open_count = session.query(TradeRecord).filter(TradeRecord.status == "OPEN").count()
+        query = session.query(TradeRecord).filter_by(
+            account_id=identity, symbol=bot_manager.engine.symbol,
+            magic=bot_manager.engine.magic_number, mode=bot_manager.engine.mode,
+        )
+        closed = query.filter(TradeRecord.status == "CLOSED").all()
+        open_count = query.filter(TradeRecord.status == "OPEN").count()
 
         closed_total = len(closed)
         total = closed_total + open_count
@@ -192,44 +204,7 @@ def set_mode(body: ModeUpdate):
 
 @router.post("/test-order")
 def test_order(body: TestOrderRequest):
-    """Places a market order directly (no strategy, no risk manager) for
-    connectivity testing — e.g. confirming the broker/account can actually
-    execute trades before trusting the automated bot to do it. Optional
-    sl/tp so it's not left with no protection if used on a real account.
-    """
-    if body.side not in ("BUY", "SELL"):
-        raise HTTPException(status_code=400, detail="side must be 'BUY' or 'SELL'")
-    engine = bot_manager.engine
-    if engine.mode == "real" and not body.confirm_real:
-        raise HTTPException(
-            status_code=403, detail="Placing a manual order on a REAL account requires confirm_real=true"
-        )
-    if not engine.broker.is_connected():
-        engine.broker.connect()
-
-    side = OrderSide.BUY if body.side == "BUY" else OrderSide.SELL
-    try:
-        position = engine.broker.place_order(engine.symbol, side, body.volume, 0.0, 0.0)
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
-
-    with db_module.SessionLocal() as session:
-        session.add(
-            TradeRecord(
-                ticket=position.ticket,
-                symbol=position.symbol,
-                side=position.side.value,
-                volume=position.volume,
-                open_price=position.open_price,
-                sl=position.sl,
-                tp=position.tp,
-                mode=engine.mode,
-                status="OPEN",
-            )
-        )
-        session.commit()
-
-    return {"ok": True, "ticket": position.ticket, "open_price": position.open_price}
+    raise HTTPException(status_code=409, detail="Unprotected manual test orders are disabled; use MT5 demo directly")
 
 
 @router.post("/backtest")

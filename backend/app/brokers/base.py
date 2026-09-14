@@ -34,6 +34,9 @@ class AccountInfo:
     equity: float
     currency: str
     leverage: int
+    account_id: str = "legacy"
+    trade_mode: str = "demo"
+    hedging: bool = True
 
 
 @dataclass
@@ -48,6 +51,12 @@ class Position:
     open_time: str
     profit: float
     magic: int = 0  # which program opened it; 0 means unknown/manual
+    swap: float = 0.0
+    commission: float = 0.0
+
+    @property
+    def net_profit(self):
+        return (self.profit or 0.0) + self.swap + self.commission
 
 
 @dataclass

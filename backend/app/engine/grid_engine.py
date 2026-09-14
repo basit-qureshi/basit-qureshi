@@ -28,6 +28,7 @@ basket_stop_loss_usd. They are the whole risk model, not decoration.
 
 import asyncio
 import logging
+import threading
 from datetime import date, datetime, timezone
 from typing import Callable, Optional
 
@@ -63,6 +64,12 @@ class GridEngine:
         timezone_name: str = "Asia/Karachi",
         on_update: Optional[Callable[[dict], None]] = None,
     ):
+        self._lock = threading.RLock()
+        self._account_id = "legacy"
+        self._risk_key = None
+        self._closing_reason = None
+        self._stop_after_close = False
+        self.ai_gate = None
         self.broker = broker
         self.symbol = symbol
         self.mode = mode
@@ -127,8 +134,8 @@ class GridEngine:
             raise PermissionError("Starting on a REAL account requires explicit confirmation (confirm_real=true)")
         if not self.broker.is_connected():
             self.broker.connect()
+        self._validate_account(self.broker.get_account_info())
         self._running = True
-        self._halt_reason = None
         # Starting does not disturb anything already running. A basket that is
         # open, or a grid still resting, is picked back up and managed as it
         # was; the gate is only armed when a fresh grid would be needed.
@@ -137,17 +144,18 @@ class GridEngine:
         self._task = asyncio.create_task(self._loop())
 
     def stop(self) -> None:
-        self._running = False
-        if self._task:
-            self._task.cancel()
-            self._task = None
+        self._stop_after_close = True
+        self._closing_reason = "User requested stop"
+        self._persist_risk()
+        if not self._running:
+            self._running = True
+            self._task = asyncio.create_task(self._loop())
 
     async def _loop(self) -> None:
         try:
             while self._running:
                 try:
                     self._tick()
-                    self._last_error = None
                 except Exception as exc:
                     self._last_error = str(exc)
                     logger.exception("grid engine tick failed")
@@ -159,11 +167,20 @@ class GridEngine:
 
     def _tick(self) -> None:
         account = self.broker.get_account_info()
+        self._validate_account(account)
         positions = self.broker.get_open_positions(self.symbol, magic=self.magic_number)
         pendings = self.broker.get_pending_orders(self.symbol, magic=self.magic_number)
         candle = self._current_candle_time()
         self._roll_day(account.equity, candle)
         self._record_new_fills(positions, candle)
+        self._settle_closed_trades()
+        if self._closing_reason:
+            self._close_everything(positions, pendings, self._closing_reason)
+            if self._closing_reason is None:
+                self._arm_gate("Basket closed")
+                if self._stop_after_close:
+                    self._running = False
+            return
 
         # A grid that was there last poll and is gone now, with nothing filled,
         # was removed outside the bot — deleted by hand in MT5, or expired. The
@@ -173,7 +190,7 @@ class GridEngine:
             self._arm_gate("Grid orders removed", candle)
         self._had_grid = bool(positions or pendings)
 
-        basket_profit = round(sum(p.profit or 0.0 for p in positions), 2)
+        basket_profit = round(sum(p.net_profit for p in positions), 2)
         hedged = self._is_hedged(positions)
         if hedged and self._hedge_warned != len(positions):
             self._hedge_warned = len(positions)
@@ -270,16 +287,25 @@ class GridEngine:
     # ------------------------------------------------------------------ grid
 
     def _build_grid(self) -> None:
+        if self.buy_stop_levels + self.sell_stop_levels > self.max_open_positions:
+            raise ValueError("Grid levels exceed position cap; lower levels before starting")
+        if self.ai_gate and not self.ai_gate.allow(self.broker, self.symbol):
+            self._last_error = self.ai_gate.reason
+            return
         price = self.broker.get_current_price(self.symbol)
         info = self.broker.get_symbol_info(self.symbol)
         # Stop orders have to clear the broker's minimum distance from the
         # market or the order is rejected outright, so the first level starts at
         # whichever is further: one grid step, or that minimum.
+        if info.spread > 0.50:
+            self._last_error = "Spread exceeds 0.50 price units; skipping grid"
+            return
         first_step = max(self.grid_distance, info.min_stop_distance)
         self._reference_price = price
         placed_buy = placed_sell = 0
 
-        for level in range(self.buy_stop_levels):
+        direction = self.ai_gate.direction if self.ai_gate and self.ai_gate.mode == "filter" else "BOTH"
+        for level in range(self.buy_stop_levels if direction in ("BOTH", "BUY") else 0):
             target = price + first_step + level * self.grid_distance
             try:
                 self.broker.place_pending_order(
@@ -289,7 +315,7 @@ class GridEngine:
             except Exception:
                 logger.exception("could not place BUY STOP at %.2f", target)
 
-        for level in range(self.sell_stop_levels):
+        for level in range(self.sell_stop_levels if direction in ("BOTH", "SELL") else 0):
             target = price - first_step - level * self.grid_distance
             try:
                 self.broker.place_pending_order(
@@ -304,7 +330,11 @@ class GridEngine:
             price, placed_buy, self.buy_stop_levels, placed_sell, self.sell_stop_levels,
             self.grid_distance, self.lot_size,
         )
-        if placed_buy < self.buy_stop_levels or placed_sell < self.sell_stop_levels:
+        if ((direction in ("BOTH", "BUY") and placed_buy < self.buy_stop_levels)
+                or (direction in ("BOTH", "SELL") and placed_sell < self.sell_stop_levels)):
+            self._halt_reason = "Incomplete grid; flattening"
+            self._closing_reason = self._halt_reason
+            self._persist_risk()
             self._last_error = (
                 f"only {placed_buy}/{self.buy_stop_levels} BUY and {placed_sell}/{self.sell_stop_levels} "
                 f"SELL stops were accepted — check margin and the broker's minimum stop distance"
@@ -314,8 +344,19 @@ class GridEngine:
         """Closes every position and cancels every pending order this bot owns,
         then verifies nothing survived. A leftover order from a finished basket
         would fill into the next one and corrupt its profit total."""
+        self._closing_reason = reason
+        self._persist_risk()
         logger.info("closing basket: %s", reason)
         realized = 0.0
+        # Pull resting orders before closing positions.
+        for order in pendings:
+            try:
+                self.broker.cancel_pending_order(order.ticket)
+            except Exception:
+                logger.exception("Cancellation failed; will retry")
+        pendings = self._current_pendings()
+        positions = self.broker.get_open_positions(self.symbol, magic=self.magic_number)
+        self._record_new_fills(positions)
         for p in positions:
             try:
                 realized += self.broker.close_position(p.ticket) or 0.0
@@ -351,7 +392,10 @@ class GridEngine:
         if still_there:
             self._last_error = f"{len(still_there)} position(s) could not be closed — not starting a new grid"
             logger.error(self._last_error)
-        self._last_basket_event = f"{reason}; realized {realized:+.2f}"
+        if not still_there and not self._current_pendings():
+            self._closing_reason = None
+        self._persist_risk()
+        self._last_basket_event = f"{reason}; settlement pending verification"
         self._reference_price = None
         # The day's realized total has just changed, so the daily target is
         # re-checked against settled trades before anything else is allowed.
@@ -441,7 +485,7 @@ class GridEngine:
             return bool(self.broker.get_pending_orders(self.symbol, magic=self.magic_number))
         except Exception:
             logger.exception("could not read existing bot state")
-            return False
+            raise
 
     # ----------------------------------------------------- daily accounting
 
@@ -466,7 +510,7 @@ class GridEngine:
         if self._trading_day is None:
             self._daily_totals = None
             return None
-        self._daily_totals = db_module.daily_totals(self.symbol, self.mode, self.magic_number, self._trading_day)
+        self._daily_totals = db_module.daily_totals(self.symbol, self.mode, self.magic_number, self._trading_day, self._account_id)
         return self._daily_totals
 
     def daily_net(self) -> float:
@@ -515,10 +559,28 @@ class GridEngine:
         return True
 
     def _current_pendings(self):
-        try:
-            return self.broker.get_pending_orders(self.symbol, magic=self.magic_number)
-        except Exception:
-            return []
+        return self.broker.get_pending_orders(self.symbol, magic=self.magic_number)
+
+    def _validate_account(self, account):
+        if account.trade_mode != self.mode or not account.hedging or account.currency != "USD":
+            raise RuntimeError("Broker account must match the app mode and be a USD hedging account")
+        if self._risk_key and account.account_id != self._account_id:
+            raise RuntimeError("Broker account changed; restart with the correct account")
+        if not self._risk_key:
+            self._account_id = account.account_id
+            self._risk_key = f"{account.account_id}|{self.symbol}|{self.magic_number}"
+            saved = db_module.load_risk(self._risk_key)
+            self._trading_day = saved.get("day")
+            self._equity_peak = saved.get("peak", account.equity)
+            self._halt_reason = saved.get("halt")
+            self._closing_reason = self._closing_reason or saved.get("closing")
+
+    def _persist_risk(self):
+        if self._risk_key:
+            db_module.save_risk(self._risk_key, {
+                "day": self._trading_day, "peak": self._equity_peak,
+                "halt": self._halt_reason, "closing": self._closing_reason,
+            })
 
     # ------------------------------------------------------------------ risk
 
@@ -536,14 +598,16 @@ class GridEngine:
             self._day = None
             self._day_start_equity = equity
             self._day_realized = 0.0
-            self._equity_peak = equity
-            self._halt_reason = None
+            # Drawdown high-water mark survives midnight and restart.
+            if self._halt_reason and self._halt_reason.startswith("daily loss"):
+                self._halt_reason = None
             self._daily_target_hit = False
             if not first_day:
                 logger.info("new broker trading day %s — daily counters and target lock reset", day)
                 self._arm_gate("New trading day", candle)
         self._refresh_daily_totals()
         self._equity_peak = max(self._equity_peak, equity)
+        self._persist_risk()
 
     def _check_risk_limits(self, account, positions, pendings) -> bool:
         """The whole risk model. A grid has no per-trade stop, so if these do not
@@ -552,8 +616,11 @@ class GridEngine:
         if self._equity_peak > 0:
             drawdown = (self._equity_peak - account.equity) / self._equity_peak * 100
 
+        self._refresh_daily_totals()
+        self._day_realized = self.daily_net()
+        daily_with_floating = self._day_realized + sum(p.net_profit for p in positions)
         reason = None
-        if self.max_daily_loss_usd > 0 and self._day_realized <= -self.max_daily_loss_usd:
+        if self.max_daily_loss_usd > 0 and daily_with_floating <= -self.max_daily_loss_usd:
             reason = f"daily loss limit reached ({self._day_realized:.2f} of {-self.max_daily_loss_usd:.2f})"
         elif self.max_equity_drawdown_percent > 0 and drawdown >= self.max_equity_drawdown_percent:
             reason = f"equity drawdown {drawdown:.1f}% reached the {self.max_equity_drawdown_percent:.1f}% limit"
@@ -563,6 +630,7 @@ class GridEngine:
 
         if self._halt_reason is None:
             self._halt_reason = reason
+            self._persist_risk()
             logger.warning("risk protection activated: %s — flattening and standing down", reason)
             # Standing down while positions stay open would leave the account
             # exposed with nothing watching it, so everything is closed first.
@@ -584,17 +652,24 @@ class GridEngine:
         for p in positions:
             if p.ticket in self._known_tickets:
                 continue
-            self._known_tickets.add(p.ticket)
             logger.info("%s STOP triggered: %s %.2f lots at %.2f", p.side.value, p.ticket, p.volume, p.open_price)
             with db_module.SessionLocal() as session:
+                existing = session.query(TradeRecord).filter_by(
+                    account_id=self._account_id, ticket=p.ticket
+                ).filter(TradeRecord.status != "DUPLICATE").first()
+                if existing:
+                    self._known_tickets.add(p.ticket)
+                    continue
                 session.add(
                     TradeRecord(
+                        account_id=self._account_id,
                         ticket=p.ticket, symbol=p.symbol, side=p.side.value, volume=p.volume,
                         open_price=p.open_price, sl=p.sl, tp=p.tp, mode=self.mode, status="OPEN",
                         magic=self.magic_number, trading_day=self._trading_day,
                     )
                 )
                 session.commit()
+                self._known_tickets.add(p.ticket)
         gone = self._known_tickets - live
         if gone:
             self._settle_closed_trades()
@@ -603,12 +678,18 @@ class GridEngine:
         """Marks tickets the broker no longer reports as open, using the broker's
         own realized figure so the dashboard matches the account history."""
         live = {p.ticket for p in self.broker.get_open_positions(self.symbol, magic=self.magic_number)}
-        closed = self._known_tickets - live
+        with db_module.SessionLocal() as session:
+            pending = session.query(TradeRecord).filter(
+                TradeRecord.account_id == self._account_id,
+                TradeRecord.symbol == self.symbol, TradeRecord.magic == self.magic_number,
+                (TradeRecord.status == "OPEN") | ((TradeRecord.status == "CLOSED") & TradeRecord.profit.is_(None)),
+            ).all()
+            closed = {r.ticket for r in pending} - live
         if not closed:
             return
         with db_module.SessionLocal() as session:
             for ticket in closed:
-                record = session.query(TradeRecord).filter_by(ticket=ticket, status="OPEN").first()
+                record = session.query(TradeRecord).filter_by(account_id=self._account_id, ticket=ticket).filter(TradeRecord.status != "DUPLICATE").first()
                 if record:
                     try:
                         profit = self.broker.get_realized_profit(ticket)
@@ -620,7 +701,9 @@ class GridEngine:
                     record.magic = self.magic_number
                     # Stamped at settlement from the broker's candle, so the
                     # day a trade counts towards never shifts afterwards.
-                    record.trading_day = self._trading_day
+                    settled_at = self.broker.get_settlement_time(ticket) if hasattr(self.broker, "get_settlement_time") else None
+                    record.close_time = settled_at or record.close_time
+                    record.trading_day = self._trading_day_for(settled_at) if settled_at else self._trading_day
                 self._known_tickets.discard(ticket)
             session.commit()
         self._refresh_daily_totals()
@@ -683,6 +766,9 @@ class GridEngine:
             "strategy_name": "GridEngine",
             "structural": False,
             "grid_mode": True,
+            "closing": self._closing_reason,
+            "account_id": self._account_id,
+            "ai": self.ai_gate.status() if self.ai_gate else {"mode": "off"},
             "halted": self._halt_reason,
             "baskets_won": self._baskets_won,
             "baskets_stopped": self._baskets_stopped,
@@ -704,7 +790,9 @@ class GridEngine:
         resolves the trading day itself when asked while the bot is stopped,
         so the cards are right before the first tick as well as after it.
         """
-        totals = self._daily_totals
+        if not self._risk_key and self.broker.is_connected():
+            self._validate_account(self.broker.get_account_info())
+        totals = self._refresh_daily_totals()
         if totals is None:
             if self._trading_day is None:
                 self._trading_day = self._trading_day_for(self._current_candle_time())

@@ -21,7 +21,7 @@ class BotManager:
 
     def __init__(self):
         self.broker: BrokerAdapter = get_broker()
-        self._reconcile_stale_open_trades()
+        init_db()  # Never reconcile other accounts or legacy rows against this broker.
         self.settings = {
             "symbol": settings.symbol,
             "timeframe": settings.timeframe,
@@ -69,11 +69,11 @@ class BotManager:
         try:
             _SETTINGS_FILE.write_text(json.dumps(self.settings, indent=2))
         except Exception:
-            pass
+            raise
 
     def _build_engine(self) -> GridEngine:
         s = self.settings
-        return GridEngine(
+        engine = GridEngine(
             broker=self.broker,
             symbol=s["symbol"],
             mode=s["mode"],
@@ -94,6 +94,9 @@ class BotManager:
             poll_interval_seconds=s["poll_interval_seconds"],
             on_update=self._on_update,
         )
+        from app.ai.gate import AIGate
+        engine.ai_gate = AIGate(settings.ai_model_path, settings.ai_mode, settings.ai_min_confidence)
+        return engine
 
     def _on_update(self, payload: dict) -> None:
         for q in list(self._subscribers):
@@ -111,6 +114,15 @@ class BotManager:
     def update_settings(self, new_settings: dict) -> None:
         if self.engine.running:
             raise RuntimeError("Stop the bot before changing settings")
+        if not self.broker.is_connected():
+            self.broker.connect()
+        if self.engine._own_state_exists():
+            raise RuntimeError("Close existing bot positions and orders before changing settings")
+        from app.api.schemas import SettingsUpdate
+        SettingsUpdate(**new_settings)
+        candidate = {**self.settings, **new_settings}
+        if candidate["grid_buy_stop_levels"] + candidate["grid_sell_stop_levels"] > candidate["grid_max_open_positions"]:
+            raise RuntimeError("Total grid levels exceed the position cap")
         self.settings.update(new_settings)
         self._save_persisted_settings()
         self.engine = self._build_engine()
@@ -118,6 +130,12 @@ class BotManager:
     def set_mode(self, mode: str) -> None:
         if self.engine.running:
             raise RuntimeError("Stop the bot before switching mode")
+        if not self.broker.is_connected():
+            self.broker.connect()
+        if self.engine._own_state_exists():
+            raise RuntimeError("Close the existing basket before changing mode")
+        if self.broker.get_account_info().trade_mode != mode:
+            raise RuntimeError("Change the actual MT5 account first; this button cannot switch broker accounts")
         self.settings["mode"] = mode
         self._save_persisted_settings()
         self.engine = self._build_engine()

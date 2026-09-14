@@ -16,6 +16,7 @@ class TradeRecord(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     ticket: Mapped[str] = mapped_column(String, index=True)
+    account_id: Mapped[str] = mapped_column(String, default="legacy", index=True)
     symbol: Mapped[str] = mapped_column(String)
     side: Mapped[str] = mapped_column(String)
     volume: Mapped[float] = mapped_column(Float)
@@ -45,7 +46,7 @@ SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 # Columns added after the first release. SQLite cannot add them through
 # create_all() on a table that already exists, and dropping the table would
 # throw away the user's trade history, so they are added in place.
-_ADDED_COLUMNS = {"magic": "INTEGER", "trading_day": "VARCHAR"}
+_ADDED_COLUMNS = {"magic": "INTEGER", "trading_day": "VARCHAR", "account_id": "VARCHAR DEFAULT 'legacy'"}
 
 
 def _migrate(bind) -> None:
@@ -62,6 +63,10 @@ def _migrate(bind) -> None:
 def init_db() -> None:
     Base.metadata.create_all(engine)
     _migrate(engine)
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE trades SET account_id='legacy' WHERE account_id IS NULL"))
+        conn.execute(text("UPDATE trades SET status='DUPLICATE' WHERE id NOT IN (SELECT MIN(id) FROM trades GROUP BY account_id, ticket)"))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_account_ticket ON trades(account_id, ticket) WHERE status != 'DUPLICATE'"))
 
 
 @dataclass
@@ -81,7 +86,7 @@ class DailyTotals:
     unsettled: int = 0  # closed trades whose realized result is not known yet
 
 
-def daily_totals(symbol: str, mode: str, magic: int, trading_day: str) -> DailyTotals:
+def daily_totals(symbol: str, mode: str, magic: int, trading_day: str, account_id: str = "legacy") -> DailyTotals:
     """The shared daily accounting source.
 
     The engine's daily target and the dashboard's daily cards both read this, so
@@ -91,6 +96,7 @@ def daily_totals(symbol: str, mode: str, magic: int, trading_day: str) -> DailyT
         rows = (
             session.query(TradeRecord)
             .filter(
+                TradeRecord.account_id == account_id,
                 TradeRecord.symbol == symbol,
                 TradeRecord.mode == mode,
                 TradeRecord.magic == magic,
@@ -118,3 +124,26 @@ def daily_totals(symbol: str, mode: str, magic: int, trading_day: str) -> DailyT
     totals.gross_loss = round(totals.gross_loss, 2)
     totals.net = round(totals.gross_profit - totals.gross_loss, 2)
     return totals
+
+class RiskState(Base):
+    __tablename__ = "risk_state"
+    key: Mapped[str] = mapped_column(String, primary_key=True)
+    data: Mapped[str] = mapped_column(String)
+
+
+def load_risk(key):
+    import json
+    with SessionLocal() as session:
+        row = session.get(RiskState, key)
+        return json.loads(row.data) if row else {}
+
+
+def save_risk(key, data):
+    import json
+    with SessionLocal() as session:
+        row = session.get(RiskState, key)
+        if row is None:
+            row = RiskState(key=key, data="{}")
+            session.add(row)
+        row.data = json.dumps(data)
+        session.commit()

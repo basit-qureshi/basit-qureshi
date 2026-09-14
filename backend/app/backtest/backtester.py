@@ -223,39 +223,55 @@ def run_grid_backtest(
             closed_on_bar = None
             basket = build(float(bar["open"]), when)
 
-        # Walk the bar. Each leg of the path can fill stops and can reach the
-        # basket target; both are checked in the order price would have met them.
+        # Recompute exits after EACH fill. Future orders must never affect an earlier target.
         for a, b_price in zip(_bar_path(bar), _bar_path(bar)[1:]):
+            current = a
             rising = b_price >= a
-            lo, hi = min(a, b_price), max(a, b_price)
-
-            triggered = [lvl for lvl in basket.buy_stops if lo <= lvl <= hi]
-            for lvl in sorted(triggered, reverse=not rising):
-                basket.buy_stops.remove(lvl)
-                basket.positions.append({"side": "BUY", "entry": lvl + spread / 2})
-                basket.fills += 1
-            triggered = [lvl for lvl in basket.sell_stops if lo <= lvl <= hi]
-            for lvl in sorted(triggered, reverse=rising):
-                basket.sell_stops.remove(lvl)
-                basket.positions.append({"side": "SELL", "entry": lvl - spread / 2})
-                basket.fills += 1
-
-            max_positions_seen = max(max_positions_seen, len(basket.positions))
-            if not basket.positions:
-                continue
-
-            target_price = basket.price_for_profit(basket_take_profit_usd, point, spread)
-            if target_price is not None and lo <= target_price <= hi:
-                close(basket, target_price, when, "TARGET")
-                basket, closed_on_bar = None, i
-                break
-
-            if basket_stop_loss_usd > 0:
-                stop_price = basket.price_for_profit(-basket_stop_loss_usd, point, spread)
-                if stop_price is not None and lo <= stop_price <= hi:
-                    close(basket, stop_price, when, "BASKET_STOP")
+            # Stops crossed in a gap fill at the first available quote.
+            for level in list(basket.buy_stops):
+                if current >= level:
+                    basket.buy_stops.remove(level)
+                    basket.positions.append({"side": "BUY", "entry": current + spread / 2})
+                    basket.fills += 1
+            for level in list(basket.sell_stops):
+                if current <= level:
+                    basket.sell_stops.remove(level)
+                    basket.positions.append({"side": "SELL", "entry": current - spread / 2})
+                    basket.fills += 1
+            while basket is not None:
+                max_positions_seen = max(max_positions_seen, len(basket.positions))
+                pnl = basket.profit_at(current, point, spread)
+                if basket.positions and (pnl >= basket_take_profit_usd - 1e-8 or
+                        (basket_stop_loss_usd > 0 and pnl <= -basket_stop_loss_usd + 1e-8)):
+                    outcome = "TARGET" if pnl >= basket_take_profit_usd - 1e-8 else "BASKET_STOP"
+                    close(basket, current, when, outcome)
                     basket, closed_on_bar = None, i
                     break
+                events = []
+                levels = basket.buy_stops if rising else basket.sell_stops
+                for level in levels:
+                    if (current < level <= b_price) if rising else (b_price <= level < current):
+                        events.append((abs(level - current), 1, "FILL", level))
+                targets = [(basket_take_profit_usd, "TARGET")]
+                if basket_stop_loss_usd > 0:
+                    targets.append((-basket_stop_loss_usd, "BASKET_STOP"))
+                for target, outcome in targets:
+                    level = basket.price_for_profit(target, point, spread)
+                    if level is not None and ((current < level <= b_price) if rising else (b_price <= level < current)):
+                        events.append((abs(level - current), 0, outcome, level))
+                if not events:
+                    break
+                _, _, outcome, current = min(events)
+                if outcome != "FILL":
+                    close(basket, current, when, outcome)
+                    basket, closed_on_bar = None, i
+                    break
+                levels.remove(current)
+                basket.positions.append({"side": "BUY" if rising else "SELL",
+                                         "entry": current + spread / 2 if rising else current - spread / 2})
+                basket.fills += 1
+            if basket is None:
+                break
 
         floating = basket.profit_at(float(bar["close"]), point, spread) if basket else 0.0
         equity = round(balance + floating, 2)
@@ -289,6 +305,11 @@ def run_grid_backtest(
         "interval": interval,
         "starting_balance": starting_balance,
         "ending_balance": balance,
+        "ending_equity": equity_curve[-1]["equity"] if equity_curve else balance,
+        "floating_profit": round((equity_curve[-1]["equity"] if equity_curve else balance) - balance, 2),
+        "open_positions": len(basket.positions) if basket else 0,
+        "validation_status": "OHLC approximation, not broker tick validation",
+        "data_source": "provided candles" if period == "provided" else "Yahoo futures proxy when fetched",
         "total_trades": len(baskets),
         "wins": len(wins),
         "losses": len(losses),

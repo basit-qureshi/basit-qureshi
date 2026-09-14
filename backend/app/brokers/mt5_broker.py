@@ -1,4 +1,6 @@
 import threading
+import time
+import math
 from datetime import datetime, timezone
 from functools import wraps
 
@@ -60,7 +62,7 @@ class MT5Broker(BrokerAdapter):
         self._password = password
         self._server = server
         self._connected = False
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     @_synchronized
     def connect(self) -> None:
@@ -82,7 +84,13 @@ class MT5Broker(BrokerAdapter):
         info = self._mt5.account_info()
         if info is None:
             raise RuntimeError(f"MT5 account_info() failed: {self._mt5.last_error()}")
-        return AccountInfo(balance=info.balance, equity=info.equity, currency=info.currency, leverage=info.leverage)
+        return AccountInfo(
+            balance=info.balance, equity=info.equity, currency=info.currency, leverage=info.leverage,
+            account_id=f"mt5:{info.server}:{info.login}",
+            trade_mode={self._mt5.ACCOUNT_TRADE_MODE_DEMO: "demo",
+                        self._mt5.ACCOUNT_TRADE_MODE_REAL: "real"}.get(info.trade_mode, "unknown"),
+            hedging=info.margin_mode == self._mt5.ACCOUNT_MARGIN_MODE_RETAIL_HEDGING,
+        )
 
     def _ensure_symbol_selected(self, symbol: str) -> None:
         """Historical/tick data calls can fail with 'Terminal: Call failed' if the
@@ -90,8 +98,10 @@ class MT5Broker(BrokerAdapter):
         only ever called from inside an already-@_synchronized method (the lock
         isn't reentrant, so double-acquiring it here would deadlock)."""
         mt5 = self._mt5
-        if mt5.symbol_info(symbol) is None:
-            mt5.symbol_select(symbol, True)
+        info = mt5.symbol_info(symbol)
+        if info is None or not info.visible:
+            if not mt5.symbol_select(symbol, True):
+                raise RuntimeError(f"Cannot select {symbol}")
 
     @_synchronized
     def get_symbol_info(self, symbol: str) -> SymbolInfo:
@@ -116,7 +126,7 @@ class MT5Broker(BrokerAdapter):
         # can be wider than a "normal" pip-based stop. Use whichever is larger.
         tick = mt5.symbol_info_tick(symbol)
         spread = (tick.ask - tick.bid) if tick else 0.0
-        spread_based_distance = spread * 3
+        spread_based_distance = spread / 2 + info.point * 5
         min_stop_distance = max(stops_level_distance, spread_based_distance)
         return SymbolInfo(
             symbol=symbol,
@@ -147,6 +157,8 @@ class MT5Broker(BrokerAdapter):
         tick = self._mt5.symbol_info_tick(symbol)
         if tick is None:
             raise RuntimeError(f"MT5 symbol_info_tick failed for {symbol}: {self._mt5.last_error()}")
+        if time.time() - tick.time > 60 or tick.bid <= 0 or tick.ask < tick.bid:
+            raise RuntimeError("Quote unavailable or older than 60 seconds")
         return (tick.bid + tick.ask) / 2
 
     @_synchronized
@@ -154,12 +166,16 @@ class MT5Broker(BrokerAdapter):
         mt5 = self._mt5
         raw = mt5.positions_get(symbol=symbol) if symbol else mt5.positions_get()
         if raw is None:
-            return []
+            raise RuntimeError(f"MT5 state unavailable: {mt5.last_error()}")
         result = []
         for p in raw:
             if magic is not None and p.magic != magic:
                 continue
             side = OrderSide.BUY if p.type == mt5.POSITION_TYPE_BUY else OrderSide.SELL
+            deals = mt5.history_deals_get(position=p.identifier)
+            if deals is None:
+                raise RuntimeError("Position costs unavailable; new entries blocked")
+            costs = sum(d.commission + getattr(d, "fee", 0.0) for d in deals)
             result.append(
                 Position(
                     ticket=str(p.ticket),
@@ -171,7 +187,7 @@ class MT5Broker(BrokerAdapter):
                     tp=p.tp,
                     open_time=datetime.fromtimestamp(p.time, tz=timezone.utc).isoformat(),
                     profit=p.profit,
-                    magic=p.magic,
+                    magic=p.magic, swap=p.swap, commission=costs,
                 )
             )
         return result
@@ -195,7 +211,11 @@ class MT5Broker(BrokerAdapter):
         # the symbol's tick, and far enough from the market to clear its minimum
         # stop distance. Too close and MT5 rejects the whole order with
         # "Invalid stops" rather than adjusting it.
-        price = round(price, info.digits)
+        step = info.trade_tick_size or info.point
+        rounding = math.ceil if order_type == PendingType.BUY_STOP else math.floor
+        price = round(rounding(price / step) * step, info.digits)
+        if not info.volume_min <= volume <= info.volume_max or abs(volume / info.volume_step - round(volume / info.volume_step)) > 1e-6:
+            raise ValueError("Invalid volume for this broker symbol")
         mt5_type = mt5.ORDER_TYPE_BUY_STOP if order_type == PendingType.BUY_STOP else mt5.ORDER_TYPE_SELL_STOP
         request = {
             "action": mt5.TRADE_ACTION_PENDING,
@@ -210,7 +230,7 @@ class MT5Broker(BrokerAdapter):
             "type_filling": mt5.ORDER_FILLING_RETURN,
         }
         result = mt5.order_send(request)
-        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+        if result is None or result.retcode not in (mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_PLACED):
             raise RuntimeError(f"MT5 pending order_send failed at {price}: {result}")
         return PendingOrder(
             ticket=str(result.order),
@@ -226,7 +246,7 @@ class MT5Broker(BrokerAdapter):
         mt5 = self._mt5
         raw = mt5.orders_get(symbol=symbol) if symbol else mt5.orders_get()
         if raw is None:
-            return []
+            raise RuntimeError(f"MT5 state unavailable: {mt5.last_error()}")
         types = {mt5.ORDER_TYPE_BUY_STOP: PendingType.BUY_STOP, mt5.ORDER_TYPE_SELL_STOP: PendingType.SELL_STOP}
         result = []
         for o in raw:
@@ -295,6 +315,8 @@ class MT5Broker(BrokerAdapter):
     def close_position(self, ticket: str) -> float:
         mt5 = self._mt5
         positions = mt5.positions_get(ticket=int(ticket))
+        if positions is None:
+            raise RuntimeError("Cannot verify the position before closing")
         if not positions:
             return 0.0
         pos = positions[0]
@@ -309,15 +331,15 @@ class MT5Broker(BrokerAdapter):
             "position": pos.ticket,
             "price": price,
             "deviation": 20,
-            "magic": 990011,
-            "comment": "forex-ai-bot-close",
+            "magic": pos.magic,
+            "comment": "grid-close",
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": mt5.ORDER_FILLING_IOC,
         }
         result = mt5.order_send(request)
-        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+        if result is None or result.retcode not in (mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_DONE_PARTIAL):
             raise RuntimeError(f"MT5 close order_send failed: {result}")
-        return pos.profit
+        return self.get_realized_profit(str(pos.identifier)) or 0.0
 
     @_synchronized
     def get_realized_profit(self, ticket: str) -> float | None:
@@ -330,7 +352,11 @@ class MT5Broker(BrokerAdapter):
             return None
         if not deals:
             return None
-        total = sum(d.profit + d.commission + d.swap for d in deals)
+        exits = [d for d in deals if d.entry in (mt5.DEAL_ENTRY_OUT, mt5.DEAL_ENTRY_OUT_BY)]
+        entered = sum(d.volume for d in deals if d.entry == mt5.DEAL_ENTRY_IN)
+        if not exits or sum(d.volume for d in exits) + 1e-8 < entered:
+            return None
+        total = sum(d.profit + d.commission + d.swap + getattr(d, "fee", 0.0) for d in deals)
         return round(total, 2)
 
     @_synchronized
@@ -359,3 +385,11 @@ class MT5Broker(BrokerAdapter):
         result = mt5.order_send(request)
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
             raise RuntimeError(f"MT5 modify SL/TP failed: {result}")
+
+    @_synchronized
+    def get_settlement_time(self, ticket):
+        deals = self._mt5.history_deals_get(position=int(ticket))
+        if not deals:
+            return None
+        exits = [d for d in deals if d.entry in (self._mt5.DEAL_ENTRY_OUT, self._mt5.DEAL_ENTRY_OUT_BY)]
+        return datetime.fromtimestamp(max(d.time for d in exits), timezone.utc) if exits else None

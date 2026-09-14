@@ -27,7 +27,7 @@ class Settings(BaseSettings):
 
     # How often the grid is checked. The basket target is a floor, so a slow
     # poll means closing later than $10 rather than at it.
-    poll_interval_seconds: int = 5
+    poll_interval_seconds: float = 1
 
     # --- Grid strategy --------------------------------------------------------
     # Fixed lot on every order. It is deliberately never scaled after a loss:
@@ -69,6 +69,10 @@ class Settings(BaseSettings):
     # zone, so they are read as UTC and converted here; set this to your
     # broker's zone if its day should roll over at a different hour.
     timezone: str = "Asia/Karachi"
+
+    ai_mode: str = "shadow"  # off, shadow, filter
+    ai_model_path: str = "models/model.json"
+    ai_min_confidence: float = 0.60
 
     database_url: str = "sqlite:///./trading_bot.db"
 

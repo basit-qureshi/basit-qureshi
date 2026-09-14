@@ -7,7 +7,6 @@ import EquityChart from "./components/EquityChart";
 import TradesTable from "./components/TradesTable";
 import SettingsPanel from "./components/SettingsPanel";
 import BacktestPanel from "./components/BacktestPanel";
-import ManualTestPanel from "./components/ManualTestPanel";
 import Toasts from "./components/Toasts";
 import "./App.css";
 
@@ -120,7 +119,7 @@ export default function App() {
     try {
       await api.stop();
       await refresh();
-      pushToast("info", "Bot stopped", "No new trades will be opened");
+      pushToast("info", "Bot stopped", "Closing bot positions and cancelling orders. Wait for broker confirmation.");
     } catch (err) {
       setGlobalError(err.message);
     } finally {
@@ -176,7 +175,7 @@ export default function App() {
 
           <LiveChart trades={trades} />
 
-          <ManualTestPanel mode={status?.mode} onOrderPlaced={refresh} />
+          <div className="panel"><b>AI: {status?.ai?.mode || "off"}</b><p>{status?.ai?.reason}</p><p>{status?.closing ? "Closing: " + status.closing : ""}</p></div>
 
           {!status?.structural && lastSignal && (
             <div className="panel signal-panel">
@@ -261,7 +260,7 @@ export default function App() {
             </div>
           )}
 
-          <EquityChart data={stats?.equity_curve} />
+          <EquityChart data={stats?.equity_curve} title="Realized P&L, current bot and account" />
           <TradesTable trades={trades} />
         </>
       )}
