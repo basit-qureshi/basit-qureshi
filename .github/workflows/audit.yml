@@ -1,0 +1,25 @@
+name: Trading audit checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    env:
+      BROKER_MODE: mock
+      OPENBLAS_NUM_THREADS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r backend/requirements.txt
+      - run: python -m compileall -q app
+        working-directory: backend
+      - run: python -m pytest -q
+        working-directory: backend
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm install && npm run lint && npm run build
+        working-directory: frontend
