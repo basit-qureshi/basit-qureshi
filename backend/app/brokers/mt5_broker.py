@@ -219,6 +219,8 @@ class MT5Broker(BrokerAdapter):
         mt5_type = mt5.ORDER_TYPE_BUY_STOP if order_type == PendingType.BUY_STOP else mt5.ORDER_TYPE_SELL_STOP
         request = {
             "action": mt5.TRADE_ACTION_PENDING,
+            # Disaster protection remains at the broker if the Python process stops.
+            "sl": round(price - max(5.0, info.trade_stops_level * info.point + step) if order_type == PendingType.BUY_STOP else price + max(5.0, info.trade_stops_level * info.point + step), info.digits),
             "symbol": symbol,
             "volume": volume,
             "type": mt5_type,
@@ -393,3 +395,15 @@ class MT5Broker(BrokerAdapter):
             return None
         exits = [d for d in deals if d.entry in (self._mt5.DEAL_ENTRY_OUT, self._mt5.DEAL_ENTRY_OUT_BY)]
         return datetime.fromtimestamp(max(d.time for d in exits), timezone.utc) if exits else None
+
+    @_synchronized
+    def check_grid_margin(self, symbol, volume, buy_levels, sell_levels, price):
+        account = self._mt5.account_info()
+        if account is None or not account.trade_allowed or not account.trade_expert:
+            raise RuntimeError("Trading disabled or account unavailable")
+        buy = self._mt5.order_calc_margin(self._mt5.ORDER_TYPE_BUY, symbol, volume, price)
+        sell = self._mt5.order_calc_margin(self._mt5.ORDER_TYPE_SELL, symbol, volume, price)
+        if buy is None or sell is None:
+            raise RuntimeError("Cannot calculate grid margin")
+        if buy * buy_levels + sell * sell_levels > account.margin_free * 0.8:
+            raise RuntimeError("Complete grid would consume more than 80% of free margin")

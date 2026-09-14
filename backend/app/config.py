@@ -70,6 +70,7 @@ class Settings(BaseSettings):
     # broker's zone if its day should roll over at a different hour.
     timezone: str = "Asia/Karachi"
 
+    allow_real_trading: bool = False
     ai_mode: str = "shadow"  # off, shadow, filter
     ai_model_path: str = "models/model.json"
     ai_min_confidence: float = 0.60

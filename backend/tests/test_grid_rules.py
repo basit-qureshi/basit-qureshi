@@ -132,7 +132,7 @@ def test_manual_trades_are_never_touched(broker, engine_factory):
     assert broker.positions[foreign.ticket].volume == 0.05
 
 
-def test_grid_positions_carry_no_individual_stop_or_target(broker, engine_factory):
+def test_grid_positions_carry_no_individual_profit_target(broker, engine_factory):
     e = engine_factory(basket_take_profit_usd=1000.0)
     armed(broker, e)
     broker.price = 4002.0
@@ -140,4 +140,4 @@ def test_grid_positions_carry_no_individual_stop_or_target(broker, engine_factor
     e._tick()
     positions = broker.get_open_positions("XAUUSD", magic=MAGIC)
     assert positions
-    assert all(p.sl == 0 and p.tp == 0 for p in positions)
+    assert all(p.tp == 0 for p in positions)

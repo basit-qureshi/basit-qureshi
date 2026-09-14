@@ -130,6 +130,11 @@ class GridEngine:
     def start(self, confirm_real: bool = False) -> None:
         if self._running:
             return
+        from app.config import settings
+        if self.mode == "real" and not settings.allow_real_trading:
+            raise PermissionError("Real trading disabled; complete broker tick and forward demo validation first")
+        if self.mode == "real" and (self.basket_stop_loss_usd <= 0 or self.max_daily_loss_usd <= 0):
+            raise PermissionError("Real trading requires positive basket and daily loss limits")
         if self.mode == "real" and not confirm_real:
             raise PermissionError("Starting on a REAL account requires explicit confirmation (confirm_real=true)")
         if not self.broker.is_connected():
@@ -294,6 +299,8 @@ class GridEngine:
             return
         price = self.broker.get_current_price(self.symbol)
         info = self.broker.get_symbol_info(self.symbol)
+        if hasattr(self.broker, "check_grid_margin"):
+            self.broker.check_grid_margin(self.symbol, self.lot_size, self.buy_stop_levels, self.sell_stop_levels, price)
         # Stop orders have to clear the broker's minimum distance from the
         # market or the order is rejected outright, so the first level starts at
         # whichever is further: one grid step, or that minimum.
