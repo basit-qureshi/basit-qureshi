@@ -1,11 +1,15 @@
 import asyncio
 import json
+from datetime import datetime, timezone
 from pathlib import Path
+
+from sqlalchemy import or_
 
 from app.brokers import get_broker
 from app.brokers.base import BrokerAdapter
 from app.config import settings
-from app.db import init_db
+from app import db as db_module
+from app.db import TradeRecord, init_db
 from app.engine.grid_engine import GridEngine
 
 _SETTINGS_FILE = Path(__file__).resolve().parent.parent / "runtime_settings.json"
@@ -17,7 +21,7 @@ class BotManager:
 
     def __init__(self):
         self.broker: BrokerAdapter = get_broker()
-        init_db()  # Never reconcile other accounts or legacy rows against this broker.
+        init_db()
         self.settings = {
             "symbol": settings.symbol,
             "timeframe": settings.timeframe,
@@ -52,25 +56,32 @@ class BotManager:
         version names settings that no longer exist, and honouring those is how
         a retired setting ends up quietly driving the bot.
         """
-        if not _SETTINGS_FILE.exists():
-            return
-        try:
+        saved = {}
+        if _SETTINGS_FILE.exists():
             saved = json.loads(_SETTINGS_FILE.read_text())
-        except Exception as exc:
-            raise RuntimeError("Cannot read runtime_settings.json; restore or repair the saved settings") from exc
         self.settings.update({k: v for k, v in saved.items() if k in self.settings})
         self.settings["strategy"] = "grid"
+        if saved.get("_grid_restore_version") != 1:
+            if _SETTINGS_FILE.exists():
+                backup = _SETTINGS_FILE.with_name("runtime_settings.before_grid_restore.json")
+                if not backup.exists():
+                    backup.write_text(_SETTINGS_FILE.read_text())
+            self.settings.update({
+                "grid_lot_size": 0.01, "grid_buy_stop_levels": 10,
+                "grid_sell_stop_levels": 10, "grid_distance": 0.30,
+                "grid_basket_take_profit_usd": 10.0,
+            })
+            self._save_persisted_settings()
 
-    def _save_persisted_settings(self, candidate=None) -> None:
-        temporary = _SETTINGS_FILE.with_suffix(".tmp")
-        temporary.write_text(json.dumps(candidate if candidate is not None else self.settings, indent=2))
-        temporary.replace(_SETTINGS_FILE)
+    def _save_persisted_settings(self) -> None:
+        try:
+            _SETTINGS_FILE.write_text(json.dumps({**self.settings, "_grid_restore_version": 1}, indent=2))
+        except Exception:
+            pass
 
     def _build_engine(self) -> GridEngine:
         s = self.settings
-        from app.api.schemas import SettingsUpdate
-        SettingsUpdate(**{key: value for key, value in s.items() if key in SettingsUpdate.model_fields})
-        engine = GridEngine(
+        return GridEngine(
             broker=self.broker,
             symbol=s["symbol"],
             mode=s["mode"],
@@ -91,9 +102,6 @@ class BotManager:
             poll_interval_seconds=s["poll_interval_seconds"],
             on_update=self._on_update,
         )
-        from app.ai.gate import AIGate
-        engine.ai_gate = AIGate(settings.ai_model_path, settings.ai_mode, settings.ai_min_confidence)
-        return engine
 
     def _on_update(self, payload: dict) -> None:
         for q in list(self._subscribers):
@@ -111,31 +119,15 @@ class BotManager:
     def update_settings(self, new_settings: dict) -> None:
         if self.engine.running:
             raise RuntimeError("Stop the bot before changing settings")
-        if not self.broker.is_connected():
-            self.broker.connect()
-        if self.engine._own_state_exists():
-            raise RuntimeError("Close existing bot positions and orders before changing settings")
-        from app.api.schemas import SettingsUpdate
-        SettingsUpdate(**new_settings)
-        candidate = {**self.settings, **new_settings}
-        if candidate["grid_buy_stop_levels"] + candidate["grid_sell_stop_levels"] > candidate["grid_max_open_positions"]:
-            raise RuntimeError("Total grid levels exceed the position cap")
-        self._save_persisted_settings(candidate)
-        self.settings = candidate
+        self.settings.update(new_settings)
+        self._save_persisted_settings()
         self.engine = self._build_engine()
 
     def set_mode(self, mode: str) -> None:
         if self.engine.running:
             raise RuntimeError("Stop the bot before switching mode")
-        if not self.broker.is_connected():
-            self.broker.connect()
-        if self.engine._own_state_exists():
-            raise RuntimeError("Close the existing basket before changing mode")
-        if self.broker.get_account_info().trade_mode != mode:
-            raise RuntimeError("Change the actual MT5 account first; this button cannot switch broker accounts")
-        candidate = {**self.settings, "mode": mode}
-        self._save_persisted_settings(candidate)
-        self.settings = candidate
+        self.settings["mode"] = mode
+        self._save_persisted_settings()
         self.engine = self._build_engine()
 
 

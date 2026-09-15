@@ -7,7 +7,11 @@ import EquityChart from "./components/EquityChart";
 import TradesTable from "./components/TradesTable";
 import SettingsPanel from "./components/SettingsPanel";
 import BacktestPanel from "./components/BacktestPanel";
+import ManualTestPanel from "./components/ManualTestPanel";
 import Toasts from "./components/Toasts";
+import PakistanClock from "./components/PakistanClock";
+import GridPanel from "./components/GridPanel";
+import { formatTime } from "./time";
 import "./App.css";
 
 export default function App() {
@@ -15,8 +19,7 @@ export default function App() {
   const [stats, setStats] = useState(null);
   const [trades, setTrades] = useState([]);
   const [liveAccount, setLiveAccount] = useState(null);
-  const [liveOpenPositions, setLiveOpenPositions] = useState([]);
-  const [lastSignal, setLastSignal] = useState(null);
+  const [liveOpenPositions, setLiveOpenPositions] = useState(null);
   const [grid, setGrid] = useState(null);
   const [busy, setBusy] = useState(false);
   const [globalError, setGlobalError] = useState(null);
@@ -86,12 +89,6 @@ export default function App() {
       if (payload.type === "tick") {
         setLiveAccount({ balance: payload.balance, equity: payload.equity, currency: "USD", leverage: 0 });
         setLiveOpenPositions(payload.open_positions || []);
-        setLastSignal({
-          signal: payload.signal,
-          reason: payload.signal_reason,
-          risk_allowed: payload.risk_allowed,
-          risk_reason: payload.risk_reason,
-        });
         setGrid(payload.grid || null);
       }
     });
@@ -119,7 +116,7 @@ export default function App() {
     try {
       await api.stop();
       await refresh();
-      pushToast("info", "Stop requested", "Closing bot positions and cancelling orders. Wait for broker confirmation.");
+      pushToast("info", "Bot stopped", "No new trades will be opened");
     } catch (err) {
       setGlobalError(err.message);
     } finally {
@@ -151,8 +148,9 @@ export default function App() {
     <div className="app">
       <Toasts toasts={toasts} onDismiss={dismissToast} />
       <header className="app-header">
-        <h1>Forex AI Trading Bot</h1>
-        <nav className="tabs">
+        <div className="brand"><div className="brand-mark">G</div><div><span className="eyebrow">TRADING WORKSPACE</span><h1>Gold Grid</h1></div></div>
+        <PakistanClock />
+        <nav className="tabs" aria-label="Main navigation">
           <button className={tab === "dashboard" ? "tab active" : "tab"} onClick={() => setTab("dashboard")}>
             Dashboard
           </button>
@@ -171,68 +169,15 @@ export default function App() {
 
       {tab === "dashboard" && (
         <>
-          <StatCards account={liveAccount || status?.account} stats={stats} liveOpenPositions={liveOpenPositions} />
+          <StatCards account={liveAccount} stats={stats} liveOpenPositions={liveOpenPositions} />
+          <div className="dashboard-workspace">
+            <LiveChart trades={trades} />
+            <GridPanel grid={grid} status={status} />
+          </div>
 
-          <LiveChart trades={trades} />
-
-          <div className="panel"><b>AI: {status?.ai?.mode || "off"}</b><p>{status?.ai?.reason}</p><p>{status?.closing ? "Closing: " + status.closing : ""}</p></div>
-
-          {!status?.structural && lastSignal && (
-            <div className="panel signal-panel">
-              <h3>Last Strategy Check</h3>
-              <p>
-                Signal: <b>{lastSignal.signal}</b> — {lastSignal.reason}
-              </p>
-              <p className={lastSignal.risk_allowed ? "tone-green" : "tone-red"}>
-                Risk check: {lastSignal.risk_allowed ? "allowed" : "blocked"} ({lastSignal.risk_reason})
-              </p>
-            </div>
-          )}
-
-          {grid && (
-            <div className="panel signal-panel">
-              <h3>Grid</h3>
-              <p>
-                {grid.buy_stops} BUY STOP · {grid.sell_stops} SELL STOP resting ·{" "}
-                <b>{grid.open_positions}</b> position{grid.open_positions === 1 ? "" : "s"} open
-                {grid.reference_price ? ` · grid built at ${grid.reference_price}` : ""}
-              </p>
-              <p>
-                Basket:{" "}
-                <b className={grid.basket_profit >= 0 ? "tone-green" : "tone-red"}>
-                  {grid.basket_profit >= 0 ? "+" : "-"}${Math.abs(grid.basket_profit).toFixed(2)}
-                </b>{" "}
-                of ${grid.target} target · {grid.baskets_won} closed at target
-                {grid.baskets_stopped > 0 ? ` · ${grid.baskets_stopped} stopped out` : ""}
-              </p>
-              {grid.last_event && <p className="muted">Last: {grid.last_event}</p>}
-              {grid.daily_target > 0 && (
-                <p className={grid.daily_target_hit ? "tone-green" : "muted"}>
-                  Daily target: <b>${(grid.today_net_profit_usd ?? 0).toFixed(2)}</b> of $
-                  {grid.daily_target.toFixed(2)}
-                  {grid.trading_day ? ` · broker day ${grid.trading_day}` : ""}
-                </p>
-              )}
-              {grid.daily_target_hit && (
-                <p className="tone-green">
-                  ✓ Daily profit target reached: trading halted for this broker day
-                </p>
-              )}
-              {grid.waiting_reason && <p className="muted">⏳ {grid.waiting_reason}</p>}
-              {grid.hedged && (
-                <p className="error-text">
-                  ⚠ Basket fully hedged. Buys and sells now cancel out, so its profit is frozen at $
-                  {grid.basket_profit.toFixed(2)} and no price movement can reach the ${grid.target} target. Only
-                  the basket stop loss or a risk limit will end it.
-                </p>
-              )}
-              {grid.halted && <p className="error-text">⚠ Halted — {grid.halted}</p>}
-            </div>
-          )}
-
-          {liveOpenPositions.length > 0 && (
+          {liveOpenPositions?.length > 0 && (
             <div className="panel">
-              <h3>Open Positions</h3>
+              <div className="panel-heading"><h3>Open positions</h3><span className="timezone-label">Times in PKT</span></div>
               <div className="table-wrap">
                 <table>
                   <thead>
@@ -241,6 +186,7 @@ export default function App() {
                       <th>Side</th>
                       <th>Volume</th>
                       <th>Open Price</th>
+                      <th>Opened (PKT)</th>
                       <th>Profit</th>
                     </tr>
                   </thead>
@@ -250,7 +196,8 @@ export default function App() {
                         <td>{p.symbol}</td>
                         <td className={p.side === "BUY" ? "tone-green" : "tone-red"}>{p.side}</td>
                         <td>{p.volume}</td>
-                        <td>{p.open_price?.toFixed(5)}</td>
+                        <td>{p.open_price?.toFixed(3)}</td>
+                        <td>{formatTime(p.open_time)}</td>
                         <td className={p.profit >= 0 ? "tone-green" : "tone-red"}>${p.profit?.toFixed(2)}</td>
                       </tr>
                     ))}
@@ -260,8 +207,9 @@ export default function App() {
             </div>
           )}
 
-          <EquityChart data={stats?.equity_curve} title="Realized P&L, current bot and account" />
+          <EquityChart data={stats?.equity_curve} title="Realized trade P&L" />
           <TradesTable trades={trades} />
+          <details className="manual-tools"><summary>Manual connection test</summary><ManualTestPanel mode={status?.mode} onOrderPlaced={refresh} /></details>
         </>
       )}
 

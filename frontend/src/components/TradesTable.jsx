@@ -2,7 +2,7 @@ import { formatTime } from "../time";
 export default function TradesTable({ trades }) {
   return (
     <div className="panel">
-      <h3>Trade History</h3>
+      <div className="panel-heading"><div><span className="eyebrow">ACTIVITY</span><h3>Trade history</h3></div><span className="timezone-label">Pakistan time · UTC+5</span></div>
       <div className="table-wrap">
         <table>
           <thead>
@@ -16,13 +16,13 @@ export default function TradesTable({ trades }) {
               <th>Status</th>
               <th>Profit</th>
               <th>Mode</th>
-              <th>Opened</th>
+              <th>Opened (PKT)</th><th>Closed (PKT)</th>
             </tr>
           </thead>
           <tbody>
             {(!trades || trades.length === 0) && (
               <tr>
-                <td colSpan={10} className="muted">
+                <td colSpan={11} className="muted">
                   No trades yet.
                 </td>
               </tr>
@@ -42,7 +42,7 @@ export default function TradesTable({ trades }) {
                   {t.profit == null ? "—" : `$${t.profit.toFixed(2)}`}
                 </td>
                 <td>{t.mode}</td>
-                <td>{t.open_time ? formatTime(t.open_time) : "—"}</td>
+                <td>{formatTime(t.open_time)}</td><td>{formatTime(t.close_time)}</td>
               </tr>
             ))}
           </tbody>

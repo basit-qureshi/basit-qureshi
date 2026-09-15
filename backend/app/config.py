@@ -27,7 +27,7 @@ class Settings(BaseSettings):
 
     # How often the grid is checked. The basket target is a floor, so a slow
     # poll means closing later than $10 rather than at it.
-    poll_interval_seconds: float = 1
+    poll_interval_seconds: int = 5
 
     # --- Grid strategy --------------------------------------------------------
     # Fixed lot on every order. It is deliberately never scaled after a loss:
@@ -51,9 +51,10 @@ class Settings(BaseSettings):
     # means a losing basket is bounded only by the two limits below.
     grid_basket_stop_loss_usd: float = 0.0
     grid_max_open_positions: int = 20
-    # Account/basket limits complement the MT5 disaster stop on each order.
-    # These legacy defaults are not suitable position sizing for every balance.
-    # Gross volume and signed net directional exposure are different quantities.
+    # These two are the entire risk model. A grid carries no per-trade stop, so
+    # nothing else ends a basket that keeps going the wrong way. At 0.01 lots a
+    # fully filled 10+10 grid is 0.20 lots, and on gold that is $20 of profit or
+    # loss for every $1 the price moves.
     grid_max_daily_loss_usd: float = 100.0
     grid_max_equity_drawdown_percent: float = 30.0
     # Tags every order so the bot manages only its own, leaving manual trades
@@ -68,11 +69,6 @@ class Settings(BaseSettings):
     # zone, so they are read as UTC and converted here; set this to your
     # broker's zone if its day should roll over at a different hour.
     timezone: str = "Asia/Karachi"
-
-    allow_real_trading: bool = False
-    ai_mode: str = "shadow"  # off, shadow, filter
-    ai_model_path: str = "models/model.json"
-    ai_min_confidence: float = 0.60
 
     database_url: str = "sqlite:///./trading_bot.db"
 

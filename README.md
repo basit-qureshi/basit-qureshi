@@ -1,159 +1,112 @@
-# Gold grid bot: audited research build
+# Gold Grid
 
-This is trading research software, not a profitable product certification.
-Real trading is disabled by default. Do not enable it based on synthetic tests,
-a video, a classifier accuracy score, or a profitable candle backtest.
+The original fixed grid strategy is restored, with immediate grid replacement
+after a profitable basket and Pakistan time throughout the dashboard.
 
-## Implemented changes
+## Trading rules
 
-* Broker position/order read failures raise errors instead of returning empty state.
-* Account mode, USD currency, and hedging mode are checked against MT5.
-* Stop Bot requests basket closure and keeps monitoring until positions and orders are gone.
-* Interrupted closures persist and retry after price changes or process restart.
-* Pending orders are cancelled before positions are closed.
-* Daily loss uses scoped settled results plus floating loss; drawdown high-water state persists.
-* Trades are scoped to account, symbol and magic. Duplicate legacy records are retained
-  as DUPLICATE and excluded from statistics. Legacy records are not guessed into a real account.
-* MT5 imports verified bot positions closed during the preceding seven days on first sync,
-  then follows subsequent deals. Stable position identifiers survive broker ticket changes.
-* Unsettled outcomes are retried. Current basket trigger includes reported commission and swap.
-* Grid exposure exceeding the position cap is rejected before creation.
-* Full grid margin is checked against 80% of free margin on MT5.
-* MT5 pending orders carry a disaster stop 5.00 price units away (or farther if broker rules require).
-  This is separate from the basket stop and is not a guaranteed basket loss limit.
-* Spreads above 0.50 price units block new grids.
-* Unprotected test-order endpoint is disabled.
-* Local server binds to 127.0.0.1 without reload or multiple workers.
-* Candle replay processes one fill/exit event at a time and reports final floating exposure.
-* A real local softmax classifier, chronological training/holdout, and optional entry filter are included.
+| Setting | Restored value |
+| --- | --- |
+| Buy stops | 10 |
+| Sell stops | 10 |
+| Lot per order | 0.01 |
+| Grid distance | 0.30 price units |
+| Combined basket profit target | 10.00 USD |
+| Indicators or AI entry filter | None |
+| Individual order SL/TP | None |
 
-See [AUDIT.md](AUDIT.md) for findings, evidence and unresolved validation.
+After the basket reaches its target, the bot cancels old pending orders, closes
+its positions, verifies that both are gone and builds the replacement grid in
+the same engine tick. It does not deliberately wait for the next M1 candle.
+Broker execution can still take time or cross a candle boundary.
 
-## Strategy and limitations
+Daily targets, the configured session and existing risk limits still apply.
+If closure or cancellation fails, the old basket is retried before replacement.
+If settlement is pending, replacement waits for the verified result without
+requiring a new candle once that result arrives.
 
-The legacy grid places 10 buy stops and 10 sell stops, each 0.01 lots, spaced
-0.30 price units apart. It checks combined basket results on a polling interval.
-Once a basket closes, the next grid waits for a later confirmed M1 candle.
-It does not guarantee a settled $10 profit: prices and costs change during closure.
+Initial Start, manual deletion of all grid orders and basket stop loss exits
+retain the original next candle behavior. Stop Bot pauses the original trading
+loop; it does not close positions or cancel broker orders.
 
-Equal buy and sell volume neutralizes directional price sensitivity, not losses,
-spread, margin needs or swap. A completely filled symmetric grid can lock a loss.
-The AI filter can select just the buy or sell side, but its value must be measured
-against the same strategy with the filter disabled.
+The distance between adjacent levels is 0.30. The first stop on each side also
+respects the original broker distance buffer, so it can be farther from the
+market when the broker's minimum distance or spread requires it.
 
-Do not assume old MAX_OPEN_TRADES, MAX_DAILY_LOSS_PERCENT, RISK_PERCENT,
-STOP_LOSS_PIPS or TAKE_PROFIT_PIPS fields control the grid.
-This build supports XAUUSD broker symbols on M1. Use GRID_MAX_OPEN_POSITIONS, GRID_MAX_DAILY_LOSS_USD,
-GRID_BASKET_STOP_LOSS_USD and GRID_MAX_EQUITY_DRAWDOWN_PERCENT.
-Saved backend/runtime_settings.json values override .env grid settings.
-The defaults are not a position-size recommendation for your balance.
+## Existing settings and history
 
-## Safe update on Windows PowerShell
+On the first backend launch after this update, the five grid values in the
+table above are restored once. Existing settings are copied to
+backend/runtime_settings.before_grid_restore.json before this change.
+Your broker symbol, account connection, polling interval, daily target and
+risk amounts keep their saved values. Future settings edits persist normally.
 
-First use MT5 to verify that the OLD version has no bot positions or pending orders.
-The OLD Stop button only stops its loop. Stop the old Python server after verifying flat.
+The original default polling interval is 5 seconds. An existing .env or saved
+runtime setting can override it, as before. Grid restart after profit does not
+add a polling delay or a candle delay once closure completes.
+
+Database compatibility, account ownership and duplicate protection remain so
+installations that ran the previous update can keep their history. No database
+reset is required. The previous added AI gate, extra entry filters and individual
+disaster stop are removed from active trading.
+
+## Pakistan time and interface
+
+Trade opening and closing times, chart crosshair, chart time axis and history
+tooltips display Asia/Karachi (PKT, UTC+5), regardless of the computer timezone.
+UTC timestamps from the database are explicitly identified before conversion.
+The UI includes a basket progress panel, visible lot/distance/level settings,
+clearer account cards and a responsive trade table. Manual connection testing
+is available in the expandable section below trade history.
+
+Session start/end settings remain UTC and are labelled UTC. The time display
+change does not silently shift the trading session.
+
+## Update on Windows PowerShell
+
+Before updating, finish the current bot basket and verify its positions and
+pending orders in MT5. Stop the backend, then back up .env, runtime_settings.json
+and trading_bot.db. Do not delete your database or broker credentials.
 
 From the repository root:
 
 ```powershell
 git status
-$backupPath = Join-Path $env:TEMP ("trading_backup_" + (Get-Date -Format yyyyMMdd_HHmmss))
-New-Item -ItemType Directory -Path $backupPath
-Copy-Item backend/.env,backend/runtime_settings.json,backend/trading_bot.db $backupPath -ErrorAction SilentlyContinue
-git pull --ff-only origin claude/forex-ai-trading-bot-izgn6l
+git config pull.ff only
+git pull origin HEAD
 cd backend
 .\venv\Scripts\python.exe -m pip install -r requirements.txt -r requirements-mt5.txt
-.\venv\Scripts\python.exe -m pytest -q
 .\venv\Scripts\python.exe run.py
 ```
 
-If Git reports local source conflicts, preserve those changes and resolve them;
-do not use reset --hard. Back up the SQLite database only after the backend stops.
-Use a compatible Windows Python (3.12 recommended for the test environment).
-
-In a second terminal from the repository root:
+From another terminal in the repository root:
 
 ```powershell
 cd frontend
-npm install
-npm run build
+npm ci
 npm run dev
 ```
 
-Keep MT5 on DEMO. Visit http://localhost:5173 and review the actual grid settings
-before clicking Start. Stop now keeps retrying until the broker confirms flat.
-No script in the export, training, report or replay tools sends live orders.
+If Git reports a conflict, preserve local changes and resolve the conflict before
+starting the backend. Do not use a hard reset. After startup, Settings should show
+0.01 lots, 10 buy levels, 10 sell levels, 0.30 distance and a $10 basket target.
 
-## Local AI workflow
-
-No API subscription is required. Training produces JSON coefficients, not a
-downloaded executable model. Default AI_MODE=shadow reports model status without
-changing entries. AI_MODE=filter blocks entries when a model is missing, stale,
-below confidence, mismatched, or fails its research eligibility check.
-AI_MODE=off disables the gate.
-
-Run from backend, with MT5 connected and the Python backend stopped:
+## Checks
 
 ```powershell
-.\venv\Scripts\python.exe -m app.tools.export_market --symbol XAUUSDm
-.\venv\Scripts\python.exe -m app.ai.train data/candles.csv --symbol XAUUSDm --cost 0.30
+cd backend
+.\venv\Scripts\python.exe -m pytest -q
+cd ../frontend
+npm test
+npm run lint
+npm run build
 ```
 
-Use your observed transaction costs; 0.30 is only an example in price units.
-Training uses the first 80% and a purged final 20% holdout. The resulting eligibility
-is a directional classifier proxy, NOT grid profitability. The model is only
-considered available after its holdout ends, so earlier replay decisions cannot
-use future-trained coefficients. Retrain after 30 days.
+The tests cover same candle profit replacement, duplicate prevention, failed
+close/cancel retries, daily target blocking, unchanged loss/startup candle gates,
+fixed lot/spacing, MT5 orders without individual SL/TP, settings migration,
+existing database compatibility and PKT formatting across computer timezones.
 
-For a demo experiment after reviewing training output, add AI_MODE=filter to
-backend/.env and restart the backend. No training occurs automatically on startup.
-Compare filtered and unfiltered results on later unseen ticks, and then forward demo.
-
-## Broker tick replay
-
-```powershell
-.\venv\Scripts\python.exe -m app.tools.export_ticks --symbol XAUUSDm --days 7
-.\venv\Scripts\python.exe -m app.tools.replay_ticks data/ticks.csv --balance 100 --contract-size 100
-.\venv\Scripts\python.exe -m app.tools.replay_ticks data/ticks.csv --balance 100 --contract-size 100 --model models/model.json
-```
-
-Set balance and contract size to the account and symbol you are evaluating.
-Replay reads runtime_settings.json and runs GridEngine in a temporary isolated
-database. It processes Bid/Ask quotes and gap fills on every tick while applying
-the configured engine polling interval. It reports ending equity including floating
-loss and simulates the 5.00 price disaster stops. It does not simulate broker
-specific stop-distance rules, rejection, latency, commission, swap, or margin
-stop-out, so even positive results require further validation. The dashboard's
-Yahoo gold futures OHLC backtest remains an explicitly labelled approximation.
-
-## Report audit
-
-```powershell
-.\venv\Scripts\python.exe -m app.tools.audit_report "C:\path\history.csv"
-```
-
-The tool accepts English detailed CSV exports, summarizes monetary columns, and
-groups by magic when available. Without magic, trades remain unclassified.
-When close deals use a different magic, join them to their opening position ID
-before claiming bot-specific performance. A deals export row is not necessarily
-one complete trade. Raw reports and trained models stay in ignored local folders.
-
-## Remaining release evidence
-
-The supplied CSV and video could not be opened by the chat's available tools.
-No claim is made that their contents were analyzed, or that manual trades were
-fully separated. Local active settings and MT5 execution have not been verified
-from here. Partial-position deal allocation across broker days remains a ledger
-limitation; see AUDIT.md. Broker history export, quote data, demo forward results, and the video's
-key frames are still needed for that assessment.
-
-Do not enable ALLOW_REAL_TRADING until you have independently verified account,
-execution, losses, costs, restart behavior and unseen-data strategy performance.
-There is no guaranteed profit setting.
-
-## Tests
-
-GitHub Actions runs Python compilation, pytest, frontend lint and production build.
-Regression cases include restart duplicates, persistent loss limits, failed-close
-retry, missing model behavior, feature causality, costs, CSV ownership ambiguity,
-tick replay isolation and order/target chronology.
+The candle backtest also permits profit cycles within one assumed candle path.
+It remains an approximation with proxy data and cannot verify broker execution
+latency or actual profitability.

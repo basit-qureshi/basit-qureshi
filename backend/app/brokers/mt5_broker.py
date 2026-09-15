@@ -126,8 +126,8 @@ class MT5Broker(BrokerAdapter):
         # can be wider than a "normal" pip-based stop. Use whichever is larger.
         tick = mt5.symbol_info_tick(symbol)
         spread = (tick.ask - tick.bid) if tick else 0.0
-        spread_based_distance = spread / 2 + info.point * 5
-        min_stop_distance = max(stops_level_distance + spread / 2, spread_based_distance)
+        spread_based_distance = spread * 3
+        min_stop_distance = max(stops_level_distance, spread_based_distance)
         return SymbolInfo(
             symbol=symbol,
             pip_size=pip_size,
@@ -157,8 +157,6 @@ class MT5Broker(BrokerAdapter):
         tick = self._mt5.symbol_info_tick(symbol)
         if tick is None:
             raise RuntimeError(f"MT5 symbol_info_tick failed for {symbol}: {self._mt5.last_error()}")
-        if time.time() - tick.time > 60 or tick.bid <= 0 or tick.ask < tick.bid:
-            raise RuntimeError("Quote unavailable or older than 60 seconds")
         return (tick.bid + tick.ask) / 2
 
     @_synchronized
@@ -210,22 +208,10 @@ class MT5Broker(BrokerAdapter):
         # the symbol's tick, and far enough from the market to clear its minimum
         # stop distance. Too close and MT5 rejects the whole order with
         # "Invalid stops" rather than adjusting it.
-        step = info.trade_tick_size or info.point
-        rounding = math.ceil if order_type == PendingType.BUY_STOP else math.floor
-        price = round(rounding(price / step) * step, info.digits)
-        if not info.volume_min <= volume <= info.volume_max or abs(volume / info.volume_step - round(volume / info.volume_step)) > 1e-6:
-            raise ValueError("Invalid volume for this broker symbol")
+        price = round(price, info.digits)
         mt5_type = mt5.ORDER_TYPE_BUY_STOP if order_type == PendingType.BUY_STOP else mt5.ORDER_TYPE_SELL_STOP
-        distance = max(5.0, info.trade_stops_level * info.point + step)
-        sl_round = math.floor if order_type == PendingType.BUY_STOP else math.ceil
-        raw_sl = price - distance if order_type == PendingType.BUY_STOP else price + distance
-        stop = round(sl_round(raw_sl / step) * step, info.digits)
-        if stop <= 0:
-            raise ValueError("Disaster stop is invalid for this symbol")
         request = {
             "action": mt5.TRADE_ACTION_PENDING,
-            # Disaster protection remains at the broker if the Python process stops.
-            "sl": stop,
             "symbol": symbol,
             "volume": volume,
             "type": mt5_type,

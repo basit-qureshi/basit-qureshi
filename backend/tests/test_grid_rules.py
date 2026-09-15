@@ -84,15 +84,14 @@ def test_basket_stop_loss_closes_the_group(broker, engine_factory):
     assert broker.get_open_positions("XAUUSD", magic=MAGIC) == []
 
 
-def test_position_cap_rejects_excess_resting_exposure(broker, engine_factory):
-    import pytest
+def test_max_open_positions_pulls_the_rest_of_the_grid(broker, engine_factory):
     e = engine_factory(max_open_positions=4, basket_take_profit_usd=1000.0)
-    e._tick()
+    armed(broker, e)
+    broker.price = 4004.0
     broker.next_candle()
-    with pytest.raises(ValueError, match="position cap"):
-        e._tick()
-    assert orders(broker) == []
-    assert broker.get_open_positions() == []
+    e._tick()
+    e._tick()
+    assert orders(broker) == [], "orders kept resting past the position cap"
 
 
 def test_risk_halt_flattens_and_stands_down(broker, engine_factory):
@@ -132,7 +131,7 @@ def test_manual_trades_are_never_touched(broker, engine_factory):
     assert broker.positions[foreign.ticket].volume == 0.05
 
 
-def test_grid_positions_carry_no_individual_profit_target(broker, engine_factory):
+def test_grid_positions_carry_no_individual_stop_or_target(broker, engine_factory):
     e = engine_factory(basket_take_profit_usd=1000.0)
     armed(broker, e)
     broker.price = 4002.0
@@ -140,4 +139,4 @@ def test_grid_positions_carry_no_individual_profit_target(broker, engine_factory
     e._tick()
     positions = broker.get_open_positions("XAUUSD", magic=MAGIC)
     assert positions
-    assert all(p.tp == 0 for p in positions)
+    assert all(p.sl == 0 and p.tp == 0 for p in positions)

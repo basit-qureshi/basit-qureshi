@@ -22,7 +22,6 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
 
   const levels = Number(form.grid_buy_stop_levels || 0) + Number(form.grid_sell_stop_levels || 0);
   const maxLots = (levels * Number(form.grid_lot_size || 0)).toFixed(2);
-  const perDollar = (maxLots * 100).toFixed(0); // gold: 1.00 lot is $100 per $1 of price
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -49,37 +48,9 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
   return (
     <div className="panel">
       <h3>Grid Settings</h3>
-      <p className="muted">
-        The bot runs one strategy: a <b>pending-order grid</b> on XAUUSD M1. It places{" "}
-        <i>Buy stop levels</i> BUY STOPs above the market and <i>Sell stop levels</i> SELL STOPs below it, all at
-        the same fixed lot. As price moves, those stops become positions. The moment the <b>combined</b> profit of
-        every open position reaches <i>Basket take profit</i>, all of them close together, every remaining pending
-        order is cancelled, and a fresh grid is built around the new price. No single trade has to reach the target
-        on its own.
-      </p>
-      <p className="muted">
-        <b>Daily profit target</b> stops the bot for the rest of the broker day once that much{" "}
-        <i>net realized</i> profit has been booked — settled trades after their losses, commission and swap, never
-        floating profit. It is judged on this bot's own trades only, so a manual order or a test trade cannot move
-        it, and the lock is worked out from those trades rather than remembered in memory: restarting the backend,
-        refreshing the page or pressing Start again will not get past it. Set it to 0 to switch it off.
-      </p>
-      <p className="muted">
-        A fresh grid is never placed on the same M1 candle the bot became ready on — whether that was Start Bot, a
-        basket closing, or the grid being deleted by hand in MT5. It waits for the broker to confirm a later candle.
-      </p>
-      <p className="muted">
-        There are no indicators and no per-trade stop loss or take profit. A grid position is only ever closed by
-        the basket rule or by the risk limits below.
-      </p>
-      <p className="muted warn-text">
-        ⚠ Know this number before you start. With your current settings a fully triggered grid is{" "}
-        <b>{maxLots} lots</b>, which on gold is about <b>${perDollar} for every $1 the price moves</b>. There is no
-        stop on an individual trade, so a basket that never reaches its target keeps growing while price runs. The
-        only things that end it are <i>Basket stop loss</i>, <i>Max daily loss</i> and <i>Max equity drawdown</i> —
-        they are the whole risk model, not optional extras. Set them to money you are genuinely willing to lose, and
-        test on demo for a meaningful number of baskets first.
-      </p>
+      <p className="muted">Every order uses the same lot size. When combined basket profit reaches the target, all bot positions close, remaining orders are cancelled, and a fresh grid starts on the same candle.</p>
+      <p className="muted">Startup, manual grid removal and loss exits still wait for the next candle. The daily target and existing risk limits can pause a new cycle.</p>
+      <div className="settings-summary"><span>{levels} pending levels</span><span>{maxLots} total lots if all fill</span><span>Display time: Pakistan (UTC+5)</span></div>
       {running && <p className="muted">Stop the bot to change settings.</p>}
       <form className="settings-form" onSubmit={handleSubmit}>
         <label>
@@ -163,7 +134,7 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
           />
         </label>
 
-        <label className="settings-span">Risk limits — the only thing that ends a losing basket</label>
+        <label className="settings-span">Risk limits</label>
         <label>
           Basket stop loss ($, 0 = off)
           <input

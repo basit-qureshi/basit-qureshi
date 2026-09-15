@@ -45,26 +45,26 @@ def test_repeated_polls_after_the_new_candle_do_not_duplicate(broker, engine_fac
 
 
 # 4 -----------------------------------------------------------------------
-def test_basket_close_waits_a_candle_before_rebuilding(broker, engine_factory):
+def test_profit_close_rebuilds_on_the_same_candle_without_duplicate_grids(broker, engine_factory):
     e = engine_factory(basket_take_profit_usd=10.0)
     e._tick()
     broker.next_candle()
     e._tick()
-    assert len(orders(broker)) == 20
-
-    broker.price = 4004.0  # sweeps the buy side and pushes the basket past +$10
-    broker.next_candle()
+    old = {o.ticket for o in orders(broker)}
+    broker.price = 4004.0
+    profit_candle = broker.candle_time
     e._tick()
+    new = {o.ticket for o in orders(broker)}
+    assert broker.candle_time == profit_candle
     assert e._baskets_won == 1
     assert broker.get_open_positions("XAUUSD", magic=MAGIC) == []
-    assert orders(broker) == [], "rebuilt on the candle the profit was booked on"
-
-    e._tick()
-    assert orders(broker) == [], "rebuilt while the same candle was still running"
-
-    broker.next_candle()
-    e._tick()
-    assert len(orders(broker)) == 20
+    assert len(new) == 20 and not (new & old)
+    assert e._reference_price == 4004.0
+    assert min(o.price for o in orders(broker) if o.order_type == PendingType.BUY_STOP) == 4004.3
+    for _ in range(5):
+        e._tick()
+    assert {o.ticket for o in orders(broker)} == new
+    assert e._baskets_won == 1
 
 
 # 5 -----------------------------------------------------------------------

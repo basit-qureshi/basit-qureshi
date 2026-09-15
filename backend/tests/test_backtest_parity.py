@@ -34,12 +34,24 @@ def test_no_basket_starts_on_the_activation_bar():
     assert all(t["open_time"] != first_bar for t in r["trades"]), "a basket started on the activation bar"
 
 
-def test_no_basket_starts_on_the_bar_another_closed_on():
-    r = run(candles(), basket_stop_loss_usd=20)
-    closes = {t["close_time"] for t in r["trades"]}
-    opens = [t["open_time"] for t in r["trades"]]
-    assert not (closes & set(opens)), "a basket opened on a bar another closed on"
-    assert len(opens) == len(set(opens)), "two baskets opened on the same bar"
+def test_profit_restarts_same_bar_but_loss_exit_waits():
+    result = run(candles(), basket_stop_loss_usd=20)
+    pairs = list(zip(result["trades"], result["trades"][1:]))
+    assert any(a["result"] == "TARGET" and a["close_time"] == b["open_time"] for a, b in pairs)
+    for previous, following in pairs:
+        if previous["result"] == "BASKET_STOP":
+            assert following["open_time"] > previous["close_time"]
+
+
+def test_multiple_profit_cycles_follow_the_remaining_path_of_one_bar():
+    frame = pd.DataFrame({"open": [4000, 4000], "high": [4000, 4010],
+                          "low": [4000, 4000], "close": [4000, 4010], "volume": [1, 1]},
+                         index=pd.date_range("2026-01-05", periods=2, freq="1min"))
+    result = run(frame)
+    assert len(result["trades"]) >= 2
+    assert all(t["close_time"] == str(frame.index[1]) for t in result["trades"])
+    assert all(t["profit"] == 10 for t in result["trades"])
+    assert result["trades"][1]["reference"] > result["trades"][0]["reference"]
 
 
 # backtest daily target ---------------------------------------------------

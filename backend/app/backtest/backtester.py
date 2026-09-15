@@ -16,11 +16,9 @@ Two things are modelled carefully because they decide the answer:
   the best or the worst, because on a grid the order of those events is the
   difference between a winning basket and a losing one.
 
-A basket that closes on a bar leaves the rest of that bar empty: the next grid
-is not built until the following candle opens, which is what the live engine
-does. Rebuilding within the same bar would put fresh stops straight back into
-the move that just paid out. The first bar of the run is activation and gets
-the same treatment, so a backtest starts the way a live start does.
+A profitable basket rebuilds at its exit price and continues along the remainder
+of the same assumed bar path. Loss exits and initial activation keep the next
+candle gate. Candle replay cannot model real polling or execution delays.
 
 The daily profit target is judged here on realized basket results only, and
 re-judged the moment a basket settles, which is the order the live engine uses.
@@ -134,6 +132,9 @@ def run_grid_backtest(
     max_equity_drawdown_percent: float = 30.0,
     df: pd.DataFrame | None = None,
 ) -> dict:
+    import math
+    if any(not math.isfinite(v) or v <= 0 for v in (grid_distance, basket_take_profit_usd, lot_size, starting_balance)):
+        raise ValueError("Positive finite distance, target, lot size and balance are required")
     if df is None:
         df = fetch_history(symbol, period, interval)
     point = _POINT.get(symbol, 0.01)
@@ -145,9 +146,7 @@ def run_grid_backtest(
     baskets: list[dict] = []
     equity_curve: list[dict] = []
     basket: _Basket | None = None
-    # Index of the bar a basket was closed on. The next grid waits for a bar
-    # after it, matching the live engine: orders are never placed back onto the
-    # same M1 candle whose move produced the profit.
+    # Loss exits wait for a later bar. Profit exits replace the grid immediately.
     closed_on_bar: int | None = None
     halted_reason: str | None = None
     day = None
@@ -245,6 +244,10 @@ def run_grid_backtest(
                         (basket_stop_loss_usd > 0 and pnl <= -basket_stop_loss_usd + 1e-8)):
                     outcome = "TARGET" if pnl >= basket_take_profit_usd - 1e-8 else "BASKET_STOP"
                     close(basket, current, when, outcome)
+                    if outcome == "TARGET" and not daily_target_locked:
+                        basket = build(current, when)
+                        closed_on_bar = None
+                        continue
                     basket, closed_on_bar = None, i
                     break
                 events = []
@@ -264,6 +267,10 @@ def run_grid_backtest(
                 _, _, outcome, current = min(events)
                 if outcome != "FILL":
                     close(basket, current, when, outcome)
+                    if outcome == "TARGET" and not daily_target_locked:
+                        basket = build(current, when)
+                        closed_on_bar = None
+                        continue
                     basket, closed_on_bar = None, i
                     break
                 levels.remove(current)

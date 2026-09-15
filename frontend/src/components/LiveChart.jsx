@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createChart, CandlestickSeries, LineSeries, createSeriesMarkers } from "lightweight-charts";
 import { api } from "../api";
-import { DISPLAY_TIMEZONE } from "../time";
+import { chartTime, formatTime, parseUtcTime } from "../time";
 
 export default function LiveChart({ trades }) {
   const containerRef = useRef(null);
@@ -15,23 +15,17 @@ export default function LiveChart({ trades }) {
     const chart = createChart(containerRef.current, {
       width: containerRef.current.clientWidth,
       height: 340,
-      layout: { background: { color: "transparent" }, textColor: "var(--muted)" },
+      layout: { background: { color: "transparent" }, textColor: getComputedStyle(containerRef.current).getPropertyValue("--muted").trim() },
       grid: {
         vertLines: { color: "rgba(150,150,150,0.1)" },
         horzLines: { color: "rgba(150,150,150,0.1)" },
       },
-      timeScale: { timeVisible: true, secondsVisible: false },
+      timeScale: { timeVisible: true, secondsVisible: false, tickMarkFormatter: chartTime },
       // The chart library labels the time axis in UTC unless told otherwise, so
       // the axis is shifted into the account owner's zone to match the rest of
       // the dashboard. Only the labels move; the data is untouched.
       localization: {
-        timeFormatter: (ts) =>
-          new Date(ts * 1000).toLocaleTimeString("en-GB", {
-            timeZone: DISPLAY_TIMEZONE,
-            hour: "2-digit",
-            minute: "2-digit",
-            hour12: false,
-          }),
+        timeFormatter: (ts) => formatTime(ts),
       },
     });
 
@@ -82,9 +76,9 @@ export default function LiveChart({ trades }) {
   useEffect(() => {
     if (!markersRef.current || !trades) return;
     const markers = trades
-      .filter((t) => t.open_time)
+      .filter((t) => parseUtcTime(t.open_time))
       .map((t) => ({
-        time: Math.floor(new Date(t.open_time).getTime() / 1000),
+        time: Math.floor(parseUtcTime(t.open_time).getTime() / 60000) * 60,
         position: t.side === "BUY" ? "belowBar" : "aboveBar",
         color: t.side === "BUY" ? "#16a34a" : "#dc2626",
         shape: t.side === "BUY" ? "arrowUp" : "arrowDown",
@@ -95,10 +89,9 @@ export default function LiveChart({ trades }) {
   }, [trades]);
 
   return (
-    <div className="panel">
-      <h3>
-        Live Price Chart <span className="muted">(candles + EMA fast/slow, trade entries marked)</span>
-      </h3>
+    <div className="panel chart-panel">
+      <div className="panel-heading"><div><span className="eyebrow">MARKET OVERVIEW</span><h3>Live price chart</h3></div><span className="timezone-label">PKT · UTC+5</span></div>
+      <p className="chart-legend"><span className="legend-fast">EMA 9</span><span className="legend-slow">EMA 21</span><span>Trade entries marked</span></p>
       {error && <p className="error-text">⚠ {error}</p>}
       <div ref={containerRef} />
     </div>

@@ -1,3 +1,4 @@
+from datetime import timezone
 import pandas as pd
 from fastapi import APIRouter, HTTPException
 
@@ -10,6 +11,15 @@ from app.db import TradeRecord
 from app.strategy.indicators import ema
 
 router = APIRouter(prefix="/api")
+
+
+def utc_iso(value):
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
 
 
 @router.get("/status")
@@ -68,8 +78,8 @@ async def get_trades(limit: int = 100):
                 "profit": r.profit,
                 "mode": r.mode,
                 "status": r.status,
-                "open_time": r.open_time.isoformat() if r.open_time else None,
-                "close_time": r.close_time.isoformat() if r.close_time else None,
+                "open_time": utc_iso(r.open_time),
+                "close_time": utc_iso(r.close_time),
             }
             for r in records
         ]
@@ -112,7 +122,7 @@ async def get_stats():
         for r in ordered:
             running += r.profit or 0
             timestamp = r.close_time or r.open_time
-            equity_curve.append({"time": timestamp.isoformat(), "equity": round(running, 2)})
+            equity_curve.append({"time": utc_iso(timestamp), "equity": round(running, 2)})
 
         return {
             "total_trades": total,
@@ -204,7 +214,44 @@ async def set_mode(body: ModeUpdate):
 
 @router.post("/test-order")
 def test_order(body: TestOrderRequest):
-    raise HTTPException(status_code=409, detail="Unprotected manual test orders are disabled; use MT5 demo directly")
+    """Places a market order directly (no strategy, no risk manager) for
+    connectivity testing — e.g. confirming the broker/account can actually
+    execute trades before trusting the automated bot to do it. Optional
+    sl/tp so it's not left with no protection if used on a real account.
+    """
+    if body.side not in ("BUY", "SELL"):
+        raise HTTPException(status_code=400, detail="side must be 'BUY' or 'SELL'")
+    engine = bot_manager.engine
+    if engine.mode == "real" and not body.confirm_real:
+        raise HTTPException(
+            status_code=403, detail="Placing a manual order on a REAL account requires confirm_real=true"
+        )
+    if not engine.broker.is_connected():
+        engine.broker.connect()
+
+    side = OrderSide.BUY if body.side == "BUY" else OrderSide.SELL
+    try:
+        position = engine.broker.place_order(engine.symbol, side, body.volume, 0.0, 0.0)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    with db_module.SessionLocal() as session:
+        session.add(
+            TradeRecord(
+                ticket=position.ticket,
+                symbol=position.symbol,
+                side=position.side.value,
+                volume=position.volume,
+                open_price=position.open_price,
+                sl=position.sl,
+                tp=position.tp,
+                mode=engine.mode,
+                status="OPEN",
+            )
+        )
+        session.commit()
+
+    return {"ok": True, "ticket": position.ticket, "open_price": position.open_price}
 
 
 @router.post("/backtest")

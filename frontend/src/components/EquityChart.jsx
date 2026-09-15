@@ -1,3 +1,4 @@
+import { formatTime } from "../time";
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis, CartesianGrid } from "recharts";
 
 export default function EquityChart({ data, title = "Equity Curve" }) {
@@ -16,8 +17,8 @@ export default function EquityChart({ data, title = "Equity Curve" }) {
             <YAxis domain={["auto", "auto"]} width={70} tick={{ fill: "var(--muted)", fontSize: 12 }} />
             <Tooltip
               contentStyle={{ background: "var(--surface)", border: "1px solid var(--border)" }}
-              formatter={(value) => [`$${value}`, "Equity"]}
-              labelFormatter={() => ""}
+              formatter={(value) => [`${value}`, "P&L"]}
+              labelFormatter={(label) => points[label]?.time ? formatTime(points[label].time) + " PKT" : ""}
             />
             <Line type="monotone" dataKey="equity" stroke="var(--accent)" dot={false} strokeWidth={2} />
           </LineChart>
