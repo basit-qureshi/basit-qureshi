@@ -38,6 +38,11 @@ class TradeRecord(Base):
     # written once at settlement so the engine, the dashboard and a restarted
     # process all read the same day for the same trade.
     trading_day: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    # Why the trade ended, in the engine's own words: the basket target, a
+    # basket stop, a risk halt. Without it the history shows what happened but
+    # never why, which is the part worth reviewing. Rows written before this
+    # column existed keep NULL rather than being guessed at.
+    close_reason: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 engine = create_engine(settings.database_url, connect_args={"check_same_thread": False})
@@ -46,7 +51,12 @@ SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 # Columns added after the first release. SQLite cannot add them through
 # create_all() on a table that already exists, and dropping the table would
 # throw away the user's trade history, so they are added in place.
-_ADDED_COLUMNS = {"magic": "INTEGER", "trading_day": "VARCHAR", "account_id": "VARCHAR DEFAULT 'legacy'"}
+_ADDED_COLUMNS = {
+    "magic": "INTEGER",
+    "trading_day": "VARCHAR",
+    "account_id": "VARCHAR DEFAULT 'legacy'",
+    "close_reason": "VARCHAR",
+}
 
 
 def _migrate(bind) -> None:

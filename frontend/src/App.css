@@ -454,6 +454,111 @@
 .manual-tools { margin-top: 18px; border-top: 1px solid var(--border); padding-top: 18px; }
 .manual-tools summary { color: var(--muted); cursor: pointer; font-size: 12px; margin-bottom: 15px; }
 .global-error { overflow-wrap: anywhere; }
+
+/* ---- Live exposure: cards, not a scrolling table -------------------------
+   The point of this panel is that nothing important needs scrolling to, so it
+   wraps into a responsive grid instead of overflowing sideways. */
+.open-trades-panel { margin-bottom: 22px; }
+.open-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+.open-summary-item {
+  background: rgba(121,179,255,.04);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 11px 13px;
+  min-width: 0;
+}
+.open-summary-item span { display: block; font-size: 10px; color: var(--muted); letter-spacing: .05em; margin-bottom: 5px; }
+.open-summary-item b { font-size: 17px; letter-spacing: -.3px; font-variant-numeric: tabular-nums; }
+.open-summary-item em { font-style: normal; font-size: 12px; font-weight: 500; }
+.open-empty { margin: 4px 0 0; }
+
+.open-trades-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+}
+.open-card {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  border-radius: 11px;
+  padding: 13px 14px;
+  background: var(--surface);
+  min-width: 0;
+}
+.open-card.is-up { border-left-color: var(--green); }
+.open-card.is-down { border-left-color: var(--red); }
+.open-card header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.open-card-vol { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.open-card-pnl { font-size: 23px; font-weight: 700; letter-spacing: -.6px; font-variant-numeric: tabular-nums; margin-bottom: 10px; }
+.open-card-detail { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 10px; margin: 0 0 9px; }
+.open-card-detail div { min-width: 0; }
+.open-card-detail dt { font-size: 10px; color: var(--muted); }
+.open-card-detail dd { margin: 0; font-size: 12px; font-variant-numeric: tabular-nums; }
+.open-card footer { font-size: 10px; }
+.badge-buy { background: rgba(69,214,171,.14); color: var(--green); border: 1px solid rgba(69,214,171,.3); }
+.badge-sell { background: rgba(255,137,145,.14); color: var(--red); border: 1px solid rgba(255,137,145,.3); }
+
+/* ---- History filters, selection summary and paging ---------------------- */
+.filter-bar {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.filter-bar label { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.filter-bar label > span { font-size: 10px; color: var(--muted); letter-spacing: .06em; text-transform: uppercase; }
+.filter-bar input, .filter-bar select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  width: 100%;
+  min-width: 0;
+}
+.filter-search { grid-column: span 2; }
+
+.filter-quick { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 14px; font-size: 11px; }
+.chip {
+  background: rgba(121,179,255,.07);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 5px 12px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.chip:hover:not(:disabled) { background: rgba(121,179,255,.16); }
+.chip:disabled { opacity: .45; cursor: not-allowed; }
+
+.selection-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: 9px;
+  padding: 12px;
+  margin-bottom: 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(121,179,255,.03);
+}
+.selection-summary div { min-width: 0; }
+.selection-summary span { display: block; font-size: 10px; color: var(--muted); margin-bottom: 4px; }
+.selection-summary b { font-size: 15px; letter-spacing: -.2px; font-variant-numeric: tabular-nums; }
+
+/* The reason can be long. It truncates with the full text on hover rather
+   than stretching the table until it scrolls. */
+.reason-cell { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+
+.pager { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 14px; }
+.pager .btn { padding: 7px 12px; }
+.pager-state { font-size: 11px; color: var(--muted); margin: 0 4px; font-variant-numeric: tabular-nums; }
+
 @media (max-width: 1050px) {
   .app { padding: 24px 20px; }
   .dashboard-workspace { grid-template-columns: minmax(0, 1fr) 290px; }
@@ -482,4 +587,11 @@
   .settings-form { grid-template-columns: minmax(0, 1fr); }
   .pakistan-clock { text-align: left; margin: 0; }
   .panel-heading { flex-wrap: wrap; gap: 8px; }
+}
+
+@media (max-width: 760px) {
+  .filter-search { grid-column: span 1; }
+  .open-trades-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
+  .reason-cell { max-width: 160px; }
+  .pager { justify-content: center; }
 }

@@ -18,7 +18,20 @@ export const api = {
     request("/api/start", { method: "POST", body: JSON.stringify({ confirm_real: confirmReal }) }),
   stop: () => request("/api/stop", { method: "POST" }),
   clearHalt: () => request("/api/clear-halt", { method: "POST" }),
-  getTrades: (limit = 100) => request(`/api/trades?limit=${limit}`),
+  // Every filter is optional; blanks are dropped so the query string only
+  // carries what was actually chosen.
+  getTrades: (params = {}) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined && value !== null && value !== "" && value !== "ALL" && value !== "all") {
+        query.set(key, value);
+      }
+    }
+    const qs = query.toString();
+    return request(`/api/trades${qs ? `?${qs}` : ""}`);
+  },
+  getTradingDays: () => request("/api/trading-days"),
+  getOpenTrades: () => request("/api/open-trades"),
   getCandles: (count = 200) => request(`/api/candles?count=${count}`),
   getStats: () => request("/api/stats"),
   getSettings: () => request("/api/settings"),

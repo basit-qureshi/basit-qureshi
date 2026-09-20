@@ -399,7 +399,7 @@ class GridEngine:
                 logger.exception("failed to cancel pending order %s", o.ticket)
 
         self._day_realized += realized
-        self._settle_closed_trades()
+        self._settle_closed_trades(reason)
 
         leftover_positions = self.broker.get_open_positions(self.symbol, magic=self.magic_number)
         leftover_orders = self.broker.get_pending_orders(self.symbol, magic=self.magic_number)
@@ -417,7 +417,7 @@ class GridEngine:
                     self.broker.cancel_pending_order(o.ticket)
                 except Exception:
                     logger.exception("failed to cancel leftover order %s", o.ticket)
-            self._settle_closed_trades()
+            self._settle_closed_trades(reason)
 
         still_there = self.broker.get_open_positions(self.symbol, magic=self.magic_number)
         if still_there:
@@ -904,9 +904,15 @@ class GridEngine:
         if gone:
             self._settle_closed_trades()
 
-    def _settle_closed_trades(self) -> None:
+    def _settle_closed_trades(self, reason: str | None = None) -> None:
         """Marks tickets the broker no longer reports as open, using the broker's
-        own realized figure so the dashboard matches the account history."""
+        own realized figure so the dashboard matches the account history.
+
+        `reason` is the engine's own explanation for the close. It is stamped
+        only on rows that do not already carry one, so the first explanation —
+        the one that actually ended the basket — is not overwritten by a later
+        sweep that found the same ticket already gone.
+        """
         live = {p.identifier or p.ticket for p in self.broker.get_open_positions(self.symbol, magic=self.magic_number)}
         with db_module.SessionLocal() as session:
             pending = session.query(TradeRecord).filter(
@@ -929,6 +935,8 @@ class GridEngine:
                     record.close_time = datetime.now(timezone.utc)
                     record.profit = profit
                     record.magic = self.magic_number
+                    if reason and not record.close_reason:
+                        record.close_reason = reason
                     # Stamped at settlement from the broker's candle, so the
                     # day a trade counts towards never shifts afterwards.
                     settled_at = self.broker.get_settlement_time(ticket) if hasattr(self.broker, "get_settlement_time") else None

@@ -11,13 +11,28 @@ import ManualTestPanel from "./components/ManualTestPanel";
 import Toasts from "./components/Toasts";
 import PakistanClock from "./components/PakistanClock";
 import GridPanel from "./components/GridPanel";
-import { formatTime } from "./time";
+import OpenTradesPanel from "./components/OpenTradesPanel";
 import "./App.css";
+
+const DEFAULT_FILTERS = {
+  date_from: "",
+  date_to: "",
+  status: "ALL",
+  side: "ALL",
+  result: "all",
+  search: "",
+  page_size: 50,
+};
 
 export default function App() {
   const [status, setStatus] = useState(null);
   const [stats, setStats] = useState(null);
-  const [trades, setTrades] = useState([]);
+  const [tradePage, setTradePage] = useState(null);
+  const [tradingDays, setTradingDays] = useState(null);
+  const [filters, setFilters] = useState(DEFAULT_FILTERS);
+  const [page, setPage] = useState(1);
+  const [tradesLoading, setTradesLoading] = useState(true);
+  const [openTrades, setOpenTrades] = useState(null);
   const [liveAccount, setLiveAccount] = useState(null);
   const [liveOpenPositions, setLiveOpenPositions] = useState(null);
   const [grid, setGrid] = useState(null);
@@ -68,23 +83,64 @@ export default function App() {
     [pushToast]
   );
 
+  // The filters and page live here and go to the server, so the rows on screen
+  // and the summary above them always come from the same query.
+  const loadTrades = useCallback(async () => {
+    setTradesLoading(true);
+    try {
+      const body = await api.getTrades({ ...filters, page });
+      setTradePage(body);
+      announceTradeChanges(body.items);
+      // The server clamps a page past the end; follow it so the controls and
+      // the rows agree about which page is showing.
+      if (body.page !== page) setPage(body.page);
+      return body;
+    } catch (err) {
+      setGlobalError(err.message);
+      return null;
+    } finally {
+      setTradesLoading(false);
+    }
+  }, [filters, page, announceTradeChanges]);
+
   const refresh = useCallback(async () => {
     try {
-      const [s, st, tr] = await Promise.all([api.getStatus(), api.getStats(), api.getTrades()]);
+      const [s, st, open, days] = await Promise.all([
+        api.getStatus(),
+        api.getStats(),
+        api.getOpenTrades().catch(() => null),
+        api.getTradingDays().catch(() => null),
+      ]);
       setStatus(s);
       setStats(st);
-      setTrades(tr);
-      announceTradeChanges(tr);
+      if (open) setOpenTrades(open);
+      if (days) setTradingDays(days);
       if (s.account) setLiveAccount(s.account);
       setGlobalError(null);
     } catch (err) {
       setGlobalError(err.message);
     }
-  }, [announceTradeChanges]);
+  }, []);
+
+  // Re-runs whenever a filter or the page changes, and on the poll below.
+  useEffect(() => {
+    loadTrades();
+  }, [loadTrades]);
+
+  // loadTrades changes identity on every filter and page change. Reaching it
+  // through a ref keeps the poll and the WebSocket effect below stable, so
+  // changing a filter does not tear down and re-open the live connection.
+  const loadTradesRef = useRef(loadTrades);
+  useEffect(() => {
+    loadTradesRef.current = loadTrades;
+  }, [loadTrades]);
 
   useEffect(() => {
     refresh();
-    const interval = setInterval(refresh, 5000);
+    const interval = setInterval(() => {
+      refresh();
+      loadTradesRef.current();
+    }, 5000);
     const disconnect = connectWebSocket((payload) => {
       if (payload.type === "tick") {
         setLiveAccount({ balance: payload.balance, equity: payload.equity, currency: "USD", leverage: 0 });
@@ -97,6 +153,13 @@ export default function App() {
       disconnect();
     };
   }, [refresh]);
+
+  // Changing a filter always returns to page 1: staying on page 7 of a
+  // selection that now has two pages would show an empty screen.
+  const handleFilterChange = useCallback((next) => {
+    setFilters(next);
+    setPage(1);
+  }, []);
 
   async function handleStart(confirmReal) {
     setBusy(true);
@@ -181,45 +244,25 @@ export default function App() {
       {tab === "dashboard" && (
         <>
           <StatCards account={liveAccount} stats={stats} liveOpenPositions={liveOpenPositions} />
+
+          {/* Live exposure sits above the chart. What the account is holding
+              right now is the thing worth seeing first, without scrolling. */}
+          <OpenTradesPanel data={openTrades} />
+
           <div className="dashboard-workspace">
-            <LiveChart trades={trades} />
+            <LiveChart trades={tradePage?.items || []} />
             <GridPanel grid={grid} status={status} onClearHalt={handleClearHalt} />
           </div>
 
-          {liveOpenPositions?.length > 0 && (
-            <div className="panel">
-              <div className="panel-heading"><h3>Open positions</h3><span className="timezone-label">Times in PKT</span></div>
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Symbol</th>
-                      <th>Side</th>
-                      <th>Volume</th>
-                      <th>Open Price</th>
-                      <th>Opened (PKT)</th>
-                      <th>Profit</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {liveOpenPositions.map((p) => (
-                      <tr key={p.ticket}>
-                        <td>{p.symbol}</td>
-                        <td className={p.side === "BUY" ? "tone-green" : "tone-red"}>{p.side}</td>
-                        <td>{p.volume}</td>
-                        <td>{p.open_price?.toFixed(3)}</td>
-                        <td>{formatTime(p.open_time)}</td>
-                        <td className={p.profit >= 0 ? "tone-green" : "tone-red"}>${p.profit?.toFixed(2)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
-
           <EquityChart data={stats?.equity_curve} title="Realized trade P&L" />
-          <TradesTable trades={trades} />
+          <TradesTable
+            page={tradePage}
+            filters={filters}
+            days={tradingDays}
+            loading={tradesLoading}
+            onFilterChange={handleFilterChange}
+            onPageChange={setPage}
+          />
           <details className="manual-tools"><summary>Manual connection test</summary><ManualTestPanel mode={status?.mode} onOrderPlaced={refresh} /></details>
         </>
       )}
