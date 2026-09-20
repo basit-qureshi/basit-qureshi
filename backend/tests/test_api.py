@@ -2,23 +2,8 @@
 
 import json
 
-import pytest
-from fastapi.testclient import TestClient
-
-
-@pytest.fixture
-def client(tmp_path, monkeypatch):
-    import app.bot_manager as bm
-
-    monkeypatch.setattr(bm, "_SETTINGS_FILE", tmp_path / "runtime_settings.json")
-    manager = bm.BotManager()
-    monkeypatch.setattr(bm, "bot_manager", manager)
-    import app.api.routes as routes
-
-    monkeypatch.setattr(routes, "bot_manager", manager)
-    from app.main import app
-
-    return TestClient(app), manager
+# `client` comes from conftest so every API test shares the same isolation:
+# a settings file under tmp_path and a broker that is always the mock.
 
 
 def test_daily_target_saves_and_persists(client, tmp_path):

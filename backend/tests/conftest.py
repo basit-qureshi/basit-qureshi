@@ -11,6 +11,22 @@ import tempfile
 
 os.environ.setdefault("DATABASE_URL", "sqlite:///" + tempfile.mktemp(suffix=".db"))
 
+# These are SET, not defaulted, and they are set before app.config is imported
+# so they win over whatever the operator's .env says.
+#
+# Without this, any test that builds a BotManager gets get_broker() reading the
+# real BROKER_MODE. On a machine configured for live trading that means the
+# test suite constructs an MT5 adapter and reaches for the running terminal:
+# with the terminal closed the tests fail on a confusing "Cannot select
+# XAUUSDm", and with it open they would be talking to a real account. Neither
+# is acceptable. Automated tests use fixtures and mocks, never a terminal.
+#
+# The symbol and account type are pinned for the same reason: results must not
+# depend on which broker's .env happens to be sitting next to the tests.
+os.environ["BROKER_MODE"] = "mock"
+os.environ["SYMBOL"] = "XAUUSD"
+os.environ["ACCOUNT_TYPE"] = "demo"
+
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -193,3 +209,25 @@ def engine_factory(broker):
         return GridEngine(broker=broker, symbol="XAUUSD", mode="demo", **kw)
 
     return _make
+
+
+@pytest.fixture
+def client(tmp_path, monkeypatch):
+    """A TestClient over a BotManager whose saved settings live in tmp_path.
+
+    Lives here rather than in one test module so every API test gets the same
+    isolation, and so the broker-mode guard in test_suite_isolation.py can
+    assert on the manager this builds.
+    """
+    import app.bot_manager as bm
+
+    monkeypatch.setattr(bm, "_SETTINGS_FILE", tmp_path / "runtime_settings.json")
+    manager = bm.BotManager()
+    monkeypatch.setattr(bm, "bot_manager", manager)
+    import app.api.routes as routes
+
+    monkeypatch.setattr(routes, "bot_manager", manager)
+    from app.main import app
+    from fastapi.testclient import TestClient
+
+    return TestClient(app), manager
