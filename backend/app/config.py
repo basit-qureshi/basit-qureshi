@@ -57,10 +57,15 @@ class Settings(BaseSettings):
     # loss for every $1 the price moves.
     grid_max_daily_loss_usd: float = 100.0
     grid_max_equity_drawdown_percent: float = 30.0
+    # Share of the balance a single basket's configured loss may never reach.
+    # With 50, a $100 account may accept at most a $50 basket stop. It is what
+    # stops a small account from accepting a budget it cannot survive.
+    grid_capital_reserve_percent: float = 50.0
     # Tags every order so the bot manages only its own, leaving manual trades
     # and any other program alone.
     grid_magic_number: int = 990022
-    # UTC hours. 0-24 means trade around the clock.
+    # Hours on the TIMEZONE clock below, not UTC - the window you set is the
+    # window you see on your own wall clock. 0-24 means trade around the clock.
     grid_trading_start_hour: int = 0
     grid_trading_end_hour: int = 24
 

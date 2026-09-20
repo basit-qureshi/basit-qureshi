@@ -59,8 +59,40 @@ The UI includes a basket progress panel, visible lot/distance/level settings,
 clearer account cards and a responsive trade table. Manual connection testing
 is available in the expandable section below trade history.
 
-Session start/end settings remain UTC and are labelled UTC. The time display
-change does not silently shift the trading session.
+Session start/end hours are now read on the same Asia/Karachi clock the rest of
+the dashboard uses. They were previously compared against raw UTC while being
+presented next to PKT times, so a window set to 17-22 actually opened at 22:00
+PKT — five hours later than it read. Anyone who had already set a window should
+re-check it: the hours now mean what they say.
+
+## Capital protection
+
+These controls exist to bound a loss, not to find a better entry. None of them
+changes the strategy: same levels, same fixed lot, same spacing, same combined
+basket target, same magic-number isolation.
+
+| Control | What it does |
+| --- | --- |
+| Net basket accounting | The target and the stop are judged on profit after swap, commission and an estimated exit cost, not on the broker's gross figure. |
+| Retried risk closure | A limit breach keeps trying to close on every poll until the account is actually flat, instead of reporting "halted" once over live positions. |
+| Durable halt | A loss halt is written to the database, so restarting the backend or pressing Start does not clear it. Releasing it is an explicit owner action that refuses while any position or pending order is still open. |
+| Affordability check | Before placing a grid the bot prices the worst case — the configured basket stop, and the structural loss a fully filled 10+10 grid locks in — and refuses the grid if either does not fit inside the balance less `GRID_CAPITAL_RESERVE_PERCENT`. |
+| Loss limits required | With both the basket stop and the daily loss limit at 0 the bot places no new grid and says so. Open positions are still managed and still closed. |
+
+A refusal is always visible on the dashboard with its reason. The bot never
+raises risk or lowers a limit on its own to make a grid fit.
+
+### The structural loss the affordability check prices
+
+A two-sided grid has a dead end. Once both sides have filled, the buy and sell
+volumes cancel, the price terms drop out, and the basket's profit stops
+responding to price at all. It freezes at the sell entries minus the buy
+entries, less the spread paid to open them — and because the buys filled above
+the reference and the sells below it, that frozen number is always a loss. A
+full 10+10 grid at 0.30 spacing locks in roughly -$37.80, and no price in
+either direction recovers it. The take profit cannot be reached from there.
+`backend/tests/test_capital_protection.py` computes this number rather than
+asserting it, so it stays correct if the levels or spacing change.
 
 ## Update on Windows PowerShell
 
@@ -106,6 +138,18 @@ The tests cover same candle profit replacement, duplicate prevention, failed
 close/cancel retries, daily target blocking, unchanged loss/startup candle gates,
 fixed lot/spacing, MT5 orders without individual SL/TP, settings migration,
 existing database compatibility and PKT formatting across computer timezones.
+
+`test_capital_protection.py` and `test_owner_controls.py` add the protections
+above: net-versus-gross basket judgement in both directions, a risk close that
+is retried until flat, a halt that survives a new engine, an unaffordable grid
+refused and an affordable one still placed, entries blocked until loss limits
+exist, the trading window read on the Pakistan clock, a halt that cannot be
+cleared over live exposure, and a drawdown high-water mark that a new trading
+day does not reset. Every one of them was written to fail against the previous
+code before the fix was made.
+
+All of it runs against an injected fake broker. No test opens, closes or
+modifies anything in a real MT5 terminal.
 
 The candle backtest also permits profit cycles within one assumed candle path.
 It remains an approximation with proxy data and cannot verify broker execution

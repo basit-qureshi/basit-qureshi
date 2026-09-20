@@ -1,4 +1,4 @@
-export default function GridPanel({ grid, status }) {
+export default function GridPanel({ grid, status , onClearHalt }) {
   const settings = status?.settings || {};
   const target = grid?.target ?? settings.grid_basket_take_profit_usd ?? 10;
   const profit = grid?.basket_profit ?? 0;
@@ -25,7 +25,27 @@ export default function GridPanel({ grid, status }) {
       <div className="cycle-note"><span className="dot dot-green" />Same candle restart after profit</div>
       {grid?.daily_target_hit && <p className="tone-green">Daily target reached. Trading paused for today.</p>}
       {grid?.waiting_reason && <p className="muted">{grid.waiting_reason}</p>}
-      {grid?.halted && <p className="error-text">{grid.halted}</p>}
+      {/* A refusal the owner cannot see looks like a broken bot. The reason the
+          grid was not placed is shown with the same weight as a halt. */}
+      {status?.entry_block_reason && (
+        <p className="error-text">⛔ Entries refused — {status.entry_block_reason}</p>
+      )}
+      {status?.trading_window && status.trading_window !== "always on" && (
+        <p className="muted">
+          Trading window: {status.trading_window}
+          {status.in_session === false ? " · outside it now, no new grids" : " · inside it now"}
+        </p>
+      )}
+      {grid?.halted && (
+        <>
+          <p className="error-text">⛔ Halted — {grid.halted}</p>
+          {onClearHalt && (
+            <button className="btn btn-ghost" onClick={onClearHalt}>
+              Clear halt (only once this bot is flat)
+            </button>
+          )}
+        </>
+      )}
       {grid?.last_event && <p className="cycle-event">{grid.last_event}</p>}
     </section>
   );

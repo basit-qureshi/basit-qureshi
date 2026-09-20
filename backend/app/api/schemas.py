@@ -19,6 +19,7 @@ class SettingsUpdate(BaseModel):
     grid_max_open_positions: int | None = None
     grid_max_daily_loss_usd: float | None = None
     grid_max_equity_drawdown_percent: float | None = None
+    grid_capital_reserve_percent: float | None = None
     grid_magic_number: int | None = None
     grid_trading_start_hour: int | None = None
     grid_trading_end_hour: int | None = None

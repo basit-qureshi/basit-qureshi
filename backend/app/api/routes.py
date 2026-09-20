@@ -50,6 +50,17 @@ async def start_bot(body: StartRequest):
     return {"ok": True}
 
 
+@router.post("/clear-halt")
+async def clear_halt():
+    """Owner action to release a risk halt. It refuses while this bot still owns
+    any position or resting order, because clearing a halt over live exposure is
+    how one breach becomes a larger one."""
+    ok, message = bot_manager.engine.clear_halt()
+    if not ok:
+        raise HTTPException(status_code=409, detail=message)
+    return {"ok": True, "message": message}
+
+
 @router.post("/stop")
 async def stop_bot():
     bot_manager.engine.stop()

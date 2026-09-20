@@ -96,8 +96,14 @@ class FakeBroker(BrokerAdapter):
             if magic is not None and p.magic != magic:
                 continue
             out.append(
-                Position(p.ticket, p.symbol, p.side, p.volume, p.open_price, p.sl, p.tp,
-                         p.open_time, self._profit(p), p.magic)
+                Position(
+                    p.ticket, p.symbol, p.side, p.volume, p.open_price, p.sl, p.tp,
+                    p.open_time, self._profit(p), p.magic,
+                    # Costs are money. Dropping them here would hide every
+                    # gross-versus-net defect from the tests that look for one.
+                    swap=p.swap, commission=p.commission,
+                    identifier=p.identifier, costs_known=p.costs_known,
+                )
             )
         return out
 

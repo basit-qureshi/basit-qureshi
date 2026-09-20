@@ -73,8 +73,11 @@ def test_daily_target_still_blocks_immediate_rebuild(broker, engine_factory):
 
 
 def test_loss_exit_still_waits_for_next_candle(broker, engine_factory):
-    broker.open_position("BUY", 4005)
-    e = engine_factory(basket_stop_loss_usd=2)
+    # A $2 stop cannot accommodate a 10+10 grid, which freezes around -$37.80
+    # once both sides fill, so the budget is raised and the seeded loss with it.
+    # What this test checks is the candle gate after a loss exit, not the size.
+    broker.open_position("BUY", 4070)
+    e = engine_factory(basket_stop_loss_usd=60)
     e._tick()
     assert not broker.positions and not broker.pending
     e._tick()

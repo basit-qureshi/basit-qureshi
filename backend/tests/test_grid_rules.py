@@ -60,24 +60,32 @@ def test_basket_holds_at_one_cent_short_and_closes_at_the_target(broker, engine_
     e._tick()
     position = broker.get_open_positions("XAUUSD", magic=MAGIC)[0]
 
-    broker.price = position.open_price + 9.99
+    exit_cost = e._estimated_exit_cost(broker.get_open_positions("XAUUSD", magic=MAGIC))
+    broker.price = position.open_price + 10.00 + exit_cost - 0.01
     broker.next_candle()
     e._tick()
     assert len(broker.get_open_positions("XAUUSD", magic=MAGIC)) == 1, "closed a cent short of the target"
 
-    broker.price = position.open_price + 10.00
+    broker.price = position.open_price + 10.00 + exit_cost
     broker.next_candle()
     e._tick()
     assert broker.get_open_positions("XAUUSD", magic=MAGIC) == []
 
 
 def test_basket_stop_loss_closes_the_group(broker, engine_factory):
-    e = engine_factory(basket_take_profit_usd=1000.0, basket_stop_loss_usd=5.0)
+    # $60 budget: a full 10+10 grid at 0.30 spacing freezes around -$37.80 once
+    # both sides fill, so a $5 stop could never let this grid be built.
+    e = engine_factory(basket_take_profit_usd=1000.0, basket_stop_loss_usd=60.0)
     armed(broker, e)
     broker.price = 4004.0   # fill the buy side
     broker.next_candle()
     e._tick()
-    broker.price = 3990.0   # then collapse
+    # Pull the sell side. Left resting it would fill on the way down and hedge
+    # the basket, freezing it at about -$37.80 — under the stop, so the stop
+    # would correctly never fire and this test would be measuring nothing.
+    for o in list(broker.get_pending_orders("XAUUSD", magic=MAGIC)):
+        broker.cancel_pending_order(o.ticket)
+    broker.price = 3990.0   # then collapse, directionally
     broker.next_candle()
     e._tick()
     assert e._baskets_stopped == 1
@@ -95,11 +103,13 @@ def test_max_open_positions_pulls_the_rest_of_the_grid(broker, engine_factory):
 
 
 def test_risk_halt_flattens_and_stands_down(broker, engine_factory):
-    e = engine_factory(basket_take_profit_usd=1000.0, basket_stop_loss_usd=6.0, max_daily_loss_usd=5.0)
+    e = engine_factory(basket_take_profit_usd=1000.0, basket_stop_loss_usd=60.0, max_daily_loss_usd=5.0)
     armed(broker, e)
     broker.price = 4004.0
     broker.next_candle()
     e._tick()
+    for o in list(broker.get_pending_orders("XAUUSD", magic=MAGIC)):
+        broker.cancel_pending_order(o.ticket)  # keep the loss directional, not hedged
     broker.price = 3985.0
     broker.next_candle()
     e._tick()          # basket stop books the loss

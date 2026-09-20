@@ -111,6 +111,17 @@ export default function App() {
     }
   }
 
+  async function handleClearHalt() {
+    try {
+      const result = await api.clearHalt();
+      pushToast("info", "Risk halt cleared", result.message);
+      await refresh();
+    } catch (err) {
+      // The refusal text explains what is still open, which is the useful part.
+      pushToast("loss", "Halt not cleared", err.message);
+    }
+  }
+
   async function handleStop() {
     setBusy(true);
     try {
@@ -172,7 +183,7 @@ export default function App() {
           <StatCards account={liveAccount} stats={stats} liveOpenPositions={liveOpenPositions} />
           <div className="dashboard-workspace">
             <LiveChart trades={trades} />
-            <GridPanel grid={grid} status={status} />
+            <GridPanel grid={grid} status={status} onClearHalt={handleClearHalt} />
           </div>
 
           {liveOpenPositions?.length > 0 && (

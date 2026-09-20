@@ -62,6 +62,7 @@ class GridEngine:
         poll_interval_seconds: int = 5,
         daily_profit_target_usd: float = 0.0,
         timezone_name: str = "Asia/Karachi",
+        capital_reserve_percent: float = 50.0,
         on_update: Optional[Callable[[dict], None]] = None,
     ):
         self._account_id = "legacy"
@@ -86,6 +87,10 @@ class GridEngine:
         self.trading_end_hour = trading_end_hour
         self.poll_interval_seconds = poll_interval_seconds
         self.daily_profit_target_usd = daily_profit_target_usd
+        # Share of the balance that must stay untouched by a single basket's
+        # configured loss. It is what stops a small account from accepting a
+        # loss budget it cannot survive.
+        self.capital_reserve_percent = capital_reserve_percent
         self.timezone_name = timezone_name
         try:
             self._tz = ZoneInfo(timezone_name)
@@ -118,9 +123,17 @@ class GridEngine:
         self._day_start_equity: float = 0.0
         self._day_realized: float = 0.0
         self._equity_peak: float = 0.0
+        # Why entries are refused right now, if they are. Distinct from
+        # _halt_reason: a halt follows a breach, this is a gate that never let
+        # the exposure be created in the first place.
+        self._entry_block: str | None = None
         # Timeframe is fixed by the strategy; kept so the chart and the rest of
         # the app can ask the engine what it is running on.
         self.timeframe = "M1"
+        # Read any unresolved halt straight away. A rebuilt engine — from a
+        # restart, or from saving settings — must already know it is halted
+        # before its first tick, and before the dashboard asks for status.
+        self._restore_risk_state()
 
     @property
     def running(self) -> bool:
@@ -134,7 +147,12 @@ class GridEngine:
         if not self.broker.is_connected():
             self.broker.connect()
         self._running = True
-        self._halt_reason = None
+        # A loss halt is NOT cleared by starting. It was written to the database
+        # when the limit was breached, and it stays until the exposure behind it
+        # is reconciled and an owner explicitly clears it. Otherwise protection
+        # would last exactly as long as the process did, and pressing Start
+        # would be a way around it.
+        self._restore_risk_state()
         # Starting does not disturb anything already running. A basket that is
         # open, or a grid still resting, is picked back up and managed as it
         # was; the gate is only armed when a fresh grid would be needed.
@@ -182,7 +200,13 @@ class GridEngine:
             self._arm_gate("Grid orders removed", candle)
         self._had_grid = bool(positions or pendings)
 
-        basket_profit = round(sum(p.profit or 0.0 for p in positions), 2)
+        basket_net, basket_gross, costs_known = self._basket_pnl(positions)
+        exit_cost = self._estimated_exit_cost(positions)
+        # What the basket is conservatively worth if it were closed right now:
+        # net of the costs already booked, minus what closing is still expected
+        # to cost. The target is judged on this, so a basket is never closed on
+        # a gross number the account will not actually receive.
+        basket_profit = round(basket_net - exit_cost, 2)
         hedged = self._is_hedged(positions)
         if hedged and self._hedge_warned != len(positions):
             self._hedge_warned = len(positions)
@@ -202,12 +226,16 @@ class GridEngine:
         # Keep closing an earned profit cycle until the old basket is flat.
         # The replacement is built below in this same tick, without a candle gate.
         if self._profit_exit_reason or (positions and basket_profit >= self.basket_take_profit_usd):
+            # costs_known is not required here: the estimate above is already
+            # conservative, so an unknown cost can only delay a close, never
+            # bring one forward.
             self._profit_exit_reason = self._profit_exit_reason or f"target reached (+{basket_profit:.2f})"
             self._close_everything(positions, pendings, self._profit_exit_reason)
             positions = self.broker.get_open_positions(self.symbol, magic=self.magic_number)
             pendings = self._current_pendings()
             account = self.broker.get_account_info()
-            basket_profit = round(sum(p.profit or 0.0 for p in positions), 2)
+            basket_net, basket_gross, costs_known = self._basket_pnl(positions)
+            basket_profit = round(basket_net - self._estimated_exit_cost(positions), 2)
             if positions or pendings:
                 self._broadcast(account, positions, pendings, basket_profit, note="Closing profitable basket")
                 return
@@ -222,7 +250,10 @@ class GridEngine:
                 return
 
         if positions:
-            if self.basket_stop_loss_usd > 0 and basket_profit <= -self.basket_stop_loss_usd:
+            # The loss side is judged on the WORSE of the two readings. A cost
+            # the broker has not reported yet must never hold protection back.
+            basket_loss_reading = min(basket_net, basket_gross) - exit_cost
+            if self.basket_stop_loss_usd > 0 and basket_loss_reading <= -self.basket_stop_loss_usd:
                 self._close_everything(positions, pendings, f"basket stop hit ({basket_profit:.2f})")
                 self._baskets_stopped += 1
                 self._arm_gate("Basket closed")
@@ -286,6 +317,11 @@ class GridEngine:
                 ready, note = self._gate_status(candle)
             if not ready:
                 self._broadcast(account, positions, pendings, basket_profit, note=note, hedged=hedged)
+                return
+            allowed, block = self._entry_gate(account)
+            self._entry_block = None if allowed else block
+            if not allowed:
+                self._broadcast(account, positions, pendings, basket_profit, note=block, hedged=hedged)
                 return
             self._build_grid()
             self._profit_restart_pending = False
@@ -392,6 +428,182 @@ class GridEngine:
         # The day's realized total has just changed, so the daily target is
         # re-checked against settled trades before anything else is allowed.
         self._refresh_daily_totals()
+
+    # --------------------------------------------------- money, honestly
+
+    def _basket_pnl(self, positions: list[Position]) -> tuple[float, float, bool]:
+        """(net, gross, every cost known).
+
+        Gross is price movement alone. Net adds the swap and commission the
+        broker has already booked. They differ by real money, and a basket
+        closed on the gross number pays out less than the target promised.
+        `costs_known` is False when any position could not report its costs.
+        """
+        gross = sum(p.profit or 0.0 for p in positions)
+        net = sum(p.net_profit for p in positions)
+        known = all(getattr(p, "costs_known", True) for p in positions)
+        return round(net, 2), round(gross, 2), known
+
+    def _estimated_exit_cost(self, positions: list[Position]) -> float:
+        """What closing this basket is still expected to cost.
+
+        Each position is closed on the far side of the spread, so the exit is
+        charged at roughly half a spread per position. This is an estimate, not
+        a quote: the real cost depends on the spread at the moment of closing,
+        which can be far wider during news or a thin session.
+        """
+        if not positions:
+            return 0.0
+        try:
+            info = self.broker.get_symbol_info(self.symbol)
+        except Exception:
+            return 0.0
+        if not info.pip_size:
+            return 0.0
+        per_point = info.pip_value_per_lot
+        half_spread_points = (info.spread / info.pip_size) / 2
+        return round(sum(half_spread_points * p.volume * per_point for p in positions), 2)
+
+    # ----------------------------------------------------- entry admission
+
+    def _entry_gate(self, account) -> tuple[bool, str | None]:
+        """Decides whether a NEW grid may be created at all.
+
+        This runs before anything reaches the broker. Refusing here is the only
+        protection that works on an account too small for the configured grid,
+        because once the orders are resting the exposure already exists.
+        """
+        if self.basket_stop_loss_usd <= 0 and self.max_daily_loss_usd <= 0:
+            return False, (
+                "RISK_CONFIG_REQUIRED: no basket stop loss and no daily loss limit are set, so nothing "
+                "would end a losing basket. Set at least one before the bot may open exposure."
+            )
+
+        affordable, reason = self._affordability(account)
+        if not affordable:
+            return False, reason
+        return True, None
+
+    def _grid_levels(self, price: float, info) -> tuple[list[float], list[float]]:
+        """The exact prices _build_grid would use. Shared so the affordability
+        check measures the grid that would really be placed, not an idealised
+        one."""
+        first_step = max(self.grid_distance, info.min_stop_distance)
+        buys = [price + first_step + i * self.grid_distance for i in range(self.buy_stop_levels)]
+        sells = [price - first_step - i * self.grid_distance for i in range(self.sell_stop_levels)]
+        return buys, sells
+
+    def _completed_grid_loss(self, price: float, info) -> float:
+        """The loss a fully filled grid is already showing, as a positive number.
+
+        Once both sides have filled, the buy and sell volumes cancel and the
+        basket's profit stops responding to price at all: it is frozen at the
+        sell entries minus the buy entries, less the spread paid to open every
+        one of them. That number is always a loss, and no price recovers it.
+
+        If it is larger than the basket stop, the configured grid cannot finish
+        building without breaching the configured budget. That is a contradiction
+        in the settings, not bad luck, and it is checkable before trading.
+        """
+        buys, sells = self._grid_levels(price, info)
+        if not info.pip_size:
+            return 0.0
+        per_point, point = info.pip_value_per_lot, info.pip_size
+        spread_points = info.spread / point
+        frozen = 0.0
+        for level in buys:  # a buy filled above the reference, closed back at it
+            frozen += (level - price) / point * self.lot_size * per_point
+        for level in sells:
+            frozen += (price - level) / point * self.lot_size * per_point
+        spread_cost = spread_points * self.lot_size * per_point * (len(buys) + len(sells))
+        return round(frozen + spread_cost, 2)
+
+    def _affordability(self, account) -> tuple[bool, str | None]:
+        try:
+            info = self.broker.get_symbol_info(self.symbol)
+            price = self.broker.get_current_price(self.symbol)
+        except Exception as exc:
+            return False, f"Cannot price the grid: {exc}. No orders placed."
+
+        balance = account.balance or 0.0
+        if balance <= 0:
+            return False, "Account balance is zero or unreadable — no orders placed."
+
+        # 1. The loss budget must be something this balance can absorb while
+        #    keeping the reserve the owner asked to protect.
+        spendable = balance * max(0.0, 100.0 - self.capital_reserve_percent) / 100.0
+        if self.basket_stop_loss_usd > 0 and self.basket_stop_loss_usd > spendable:
+            return False, (
+                f"NO_TRADE: the ${self.basket_stop_loss_usd:.2f} basket stop is more than the "
+                f"${spendable:.2f} this ${balance:.2f} account may risk while keeping a "
+                f"{self.capital_reserve_percent:.0f}% reserve."
+            )
+
+        # 2. The grid must be able to finish building inside that budget.
+        frozen = self._completed_grid_loss(price, info)
+        budget = self.basket_stop_loss_usd if self.basket_stop_loss_usd > 0 else spendable
+        if frozen > budget:
+            lots = (self.buy_stop_levels + self.sell_stop_levels) * self.lot_size
+            return False, (
+                f"NO_TRADE: a fully filled {self.buy_stop_levels}+{self.sell_stop_levels} grid at "
+                f"{self.lot_size} lots ({lots:.2f} lots total) locks in about ${frozen:.2f} of loss once "
+                f"both sides fill, which is more than the ${budget:.2f} budget. Reduce the levels, the "
+                f"lot size or the spacing, or raise the budget — the grid as configured cannot finish "
+                f"building without breaching it."
+            )
+
+        # 3. The broker must actually have the margin for it.
+        free_margin = getattr(account, "free_margin", None)
+        if free_margin is not None and free_margin <= 0:
+            return False, "NO_TRADE: the account reports no free margin."
+        return True, None
+
+    # ------------------------------------------------- durable risk state
+
+    def _risk_key(self) -> str:
+        return f"halt:{self._account_id}:{self.symbol}:{self.magic_number}:{self.mode}"
+
+    def _restore_risk_state(self) -> None:
+        """Reads back a halt written by an earlier run of this same identity."""
+        try:
+            saved = db_module.load_risk(self._risk_key()) or {}
+        except Exception:
+            logger.exception("could not read the persisted risk state")
+            return
+        reason = saved.get("halt_reason")
+        if reason:
+            self._halt_reason = reason
+            logger.warning("restored an unresolved risk halt: %s", reason)
+        peak = saved.get("equity_peak")
+        if isinstance(peak, (int, float)) and peak > self._equity_peak:
+            self._equity_peak = float(peak)
+
+    def _persist_risk_state(self) -> None:
+        try:
+            db_module.save_risk(
+                self._risk_key(),
+                {"halt_reason": self._halt_reason, "equity_peak": self._equity_peak},
+            )
+        except Exception:
+            logger.exception("could not persist the risk state")
+
+    def clear_halt(self) -> tuple[bool, str]:
+        """Owner action. Refuses while exposure this bot owns is still open,
+        because clearing a halt over live positions is how a breach becomes a
+        bigger one."""
+        try:
+            positions = self.broker.get_open_positions(self.symbol, magic=self.magic_number)
+            pendings = self.broker.get_pending_orders(self.symbol, magic=self.magic_number)
+        except Exception as exc:
+            return False, f"Cannot confirm the account is flat: {exc}"
+        if positions or pendings:
+            return False, (
+                f"Not cleared: {len(positions)} position(s) and {len(pendings)} order(s) are still open. "
+                "The halt stays until this bot's exposure is gone."
+            )
+        self._halt_reason = None
+        self._persist_risk_state()
+        return True, "Risk halt cleared."
 
     def _is_hedged(self, positions: list[Position]) -> bool:
         """True when the open positions net to zero volume.
@@ -562,20 +774,41 @@ class GridEngine:
         """
         day = self._trading_day_for(candle)
         if day is not None and day != self._trading_day:
-            first_day = self._trading_day is None
+            # Binding to a day for the first time is not a rollover. A freshly
+            # constructed engine goes through this on its very first tick, and
+            # treating it as a new day is how a restart used to wipe its own
+            # restored halt and its drawdown high-water mark.
+            first_binding = self._trading_day is None
             self._trading_day = day
             self._day = None
-            self._day_start_equity = equity
-            self._day_realized = 0.0
-            self._equity_peak = equity
-            self._halt_reason = None
-            self._daily_target_hit = False
-            if not first_day:
+            if not first_binding:
+                self._day_start_equity = equity
+                self._day_realized = 0.0
+                self._daily_target_hit = False
                 self._profit_restart_pending = False
-                logger.info("new broker trading day %s — daily counters and target lock reset", day)
+                # A daily LOSS halt belongs to the day that produced it, so a
+                # genuine rollover may release it — but only once this bot owns
+                # nothing, because clearing a halt over live exposure is how one
+                # breach becomes a larger one. A drawdown halt is not released
+                # here at all: it needs an explicit owner reset.
+                if self._halt_reason and self._halt_reason.startswith("daily loss"):
+                    if self._own_state_exists():
+                        logger.warning(
+                            "new trading day %s but exposure is still open — the daily loss halt stands", day
+                        )
+                    else:
+                        logger.info("new broker trading day %s — daily loss halt released", day)
+                        self._halt_reason = None
+                        self._persist_risk_state()
+                logger.info("new broker trading day %s — daily counters reset", day)
                 self._arm_gate("New trading day", candle)
         self._refresh_daily_totals()
-        self._equity_peak = max(self._equity_peak, equity)
+        # The peak is a high-water mark across the whole life of the account for
+        # this bot, not per day. Resetting it every morning would let an account
+        # bleed down indefinitely, one "fresh" day at a time.
+        if equity > self._equity_peak:
+            self._equity_peak = equity
+            self._persist_risk_state()
 
     def _check_risk_limits(self, account, positions, pendings) -> bool:
         """The whole risk model. A grid has no per-trade stop, so if these do not
@@ -591,23 +824,54 @@ class GridEngine:
             reason = f"equity drawdown {drawdown:.1f}% reached the {self.max_equity_drawdown_percent:.1f}% limit"
 
         if reason is None:
-            return self._halt_reason is not None
+            if self._halt_reason is None:
+                return False
+            # Already halted and no longer breaching. The halt still stands, and
+            # any exposure it was meant to remove is still chased below.
+            reason = self._halt_reason
 
         if self._halt_reason is None:
             self._halt_reason = reason
+            # Written down BEFORE the liquidation is attempted. If the process
+            # dies mid-close, the next run still knows it was halted.
+            self._persist_risk_state()
             logger.warning("risk protection activated: %s — flattening and standing down", reason)
-            # Standing down while positions stay open would leave the account
-            # exposed with nothing watching it, so everything is closed first.
+
+        # The close is retried on every poll for as long as this bot still owns
+        # anything. Closing once and then reporting "halted" forever is how a
+        # breach turns into an unwatched open position: the bot looks stopped
+        # while the money is still on the table.
+        if positions or pendings:
+            logger.warning(
+                "risk halt still holds %d position(s) and %d order(s) — retrying closure",
+                len(positions), len(pendings),
+            )
             self._close_everything(positions, pendings, f"risk protection: {reason}")
         return True
 
     def _within_session(self) -> bool:
+        """The trading window, read in the configured timezone.
+
+        The hours are Pakistan time by default, because that is the clock the
+        owner sets them by. Reading them as UTC instead silently shifted every
+        window by five hours: "trade 17:00-22:00" became 22:00-03:00 PKT.
+
+        The clock here is the machine's, not the broker's. A wrong machine
+        clock moves the window, so this gate is a convenience, not a guarantee.
+        """
         if self.trading_start_hour == 0 and self.trading_end_hour >= 24:
             return True
-        hour = datetime.now(timezone.utc).hour
+        hour = datetime.now(timezone.utc).astimezone(self._tz).hour
         if self.trading_start_hour <= self.trading_end_hour:
             return self.trading_start_hour <= hour < self.trading_end_hour
         return hour >= self.trading_start_hour or hour < self.trading_end_hour  # window crosses midnight
+
+    def session_label(self) -> str:
+        """How the window reads to the owner, in their own clock."""
+        if self.trading_start_hour == 0 and self.trading_end_hour >= 24:
+            return "always on"
+        tz = self.timezone_name.split("/")[-1]
+        return f"{self.trading_start_hour:02d}:00-{self.trading_end_hour:02d}:00 {tz}"
 
     # ------------------------------------------------------- trade recording
 
@@ -708,6 +972,9 @@ class GridEngine:
             self._known_tickets.clear()
             self._daily_totals = None
             self._history_ready = False
+            # The halt is keyed by account, so binding to the real account is
+            # the first moment its own halt can be read.
+            self._restore_risk_state()
 
     def _broadcast(
         self, account, positions, pendings, basket_profit: float, note: str | None = None,
@@ -750,6 +1017,9 @@ class GridEngine:
                     "trading_day": self._trading_day,
                     "daily_target": self.daily_profit_target_usd,
                     "daily_target_hit": self._daily_target_hit,
+                    "entry_block_reason": self._entry_block,
+                    "trading_window": self.session_label(),
+                    "in_session": self._within_session(),
                     **self.daily_summary(),
                 },
             }
@@ -779,6 +1049,16 @@ class GridEngine:
             "daily_target_hit": self._daily_target_hit,
             "waiting_for_candle": self._gate_anchor is not None or self._gate_reason is not None,
             "waiting_reason": self._gate_reason,
+            # Why new exposure is refused right now, if it is. A halt follows a
+            # breach; an entry block stopped the exposure being created at all.
+            "entry_blocked": self._entry_block is not None,
+            "entry_block_reason": self._entry_block,
+            "trading_window": self.session_label(),
+            "in_session": self._within_session(),
+            "capital_reserve_percent": self.capital_reserve_percent,
+            "basket_stop_loss_usd": self.basket_stop_loss_usd,
+            "max_daily_loss_usd": self.max_daily_loss_usd,
+            "max_equity_drawdown_percent": self.max_equity_drawdown_percent,
             **self.daily_summary(),
         }
 
