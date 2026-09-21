@@ -10,6 +10,7 @@ from app.bot_manager import bot_manager
 from app.brokers.base import OrderSide, PendingType
 from app import db as db_module
 from app.db import TradeRecord
+from app.strategy import profiles as strategy_profiles
 from app.strategy.indicators import ema
 
 logger = logging.getLogger("api")
@@ -488,6 +489,25 @@ def get_candles(count: int = 200):
         "candles": candles,
         "ema_fast": [{"time": t, "value": float(v)} for t, v in zip(times, ema_fast)],
         "ema_slow": [{"time": t, "value": float(v)} for t, v in zip(times, ema_slow)],
+    }
+
+
+@router.get("/research-profiles")
+def get_research_profiles():
+    """The named, versioned profiles and which one is actually live.
+
+    Phase C candidates are research only. They are listed here so their gates
+    and parameters are inspectable, and every one reports live_enabled=false —
+    offline evidence is not approval to trade.
+    """
+    return {
+        "active": strategy_profiles.BASELINE.key,
+        "active_detail": strategy_profiles.BASELINE.as_dict(),
+        "profiles": [p.as_dict() for p in strategy_profiles.ALL_PROFILES.values()],
+        "note": (
+            "Research profiles are evaluated offline only. Selection is currently "
+            "BLOCKED BY DATA: no tick history is present in this repository."
+        ),
     }
 
 
