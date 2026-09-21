@@ -59,6 +59,21 @@ class FakeBroker(BrokerAdapter):
         self.pending_magic: dict[str, int] = {}
         self.realized: dict[str, float] = {}
         self.spread = 0.24
+        # Broker-side identity. `trade_mode` is what the BROKER says the
+        # account is; a test flips it to "real" to prove the engine refuses a
+        # real account sitting behind a local "demo" label.
+        # "legacy" matches what the seeding helpers in the existing tests
+        # write, so adding a broker-reported identity does not silently
+        # orphan their records. A test that is ABOUT identity sets this to a
+        # different value to prove state does not carry across accounts.
+        self.account_id = "legacy"
+        self.trade_mode = "demo"
+        self.trade_allowed = True
+        # Switches for the degraded-data cases. Unknown must block, never
+        # quietly become a permissive default.
+        self.free_margin_unknown = False
+        self.margin_calc_fails = False
+        self.settlement_times: dict[str, object] = {}
 
     # -- test controls --------------------------------------------------------
     def next_candle(self, minutes: int = 1) -> None:
@@ -81,7 +96,26 @@ class FakeBroker(BrokerAdapter):
 
     def get_account_info(self):
         equity = self.balance + sum(self._profit(p) for p in self.positions.values())
-        return AccountInfo(balance=self.balance, equity=equity, currency="USD", leverage=500)
+        used = round(sum(self._margin_for(p.volume, p.open_price) for p in self.positions.values()), 2)
+        # A broker that cannot answer these is modelled by setting them to None
+        # in a specific test. The default double answers, because a real broker
+        # does, and the engine must be exercised against a realistic contract.
+        return AccountInfo(
+            balance=self.balance, equity=equity, currency="USD", leverage=500,
+            account_id=self.account_id, trade_mode=self.trade_mode, hedging=True,
+            trade_allowed=self.trade_allowed,
+            margin=used,
+            free_margin=None if self.free_margin_unknown else round(equity - used, 2),
+            broker_id="fake",
+        )
+
+    def _margin_for(self, volume, price):
+        return abs(volume) * 100.0 * price / 500  # gold: 100 oz per lot, 1:500
+
+    def calc_margin(self, symbol, side, volume, price):
+        if self.margin_calc_fails:
+            return None
+        return round(self._margin_for(volume, price), 2)
 
     def get_symbol_info(self, symbol):
         return SymbolInfo(symbol, POINT, VALUE_PER_POINT_PER_LOT, 0.01, 0.01,
@@ -206,6 +240,11 @@ def engine_factory(broker):
 
     def _make(**kw):
         kw.setdefault("magic_number", MAGIC)
+        # Illustrative fixture values, NOT the owner's trading settings. A
+        # capital floor is now required before any grid may be placed, so the
+        # double supplies one; tests that check the requirement itself pass
+        # capital_floor_usd=0.0 explicitly.
+        kw.setdefault("capital_floor_usd", 50.0)
         return GridEngine(broker=broker, symbol="XAUUSD", mode="demo", **kw)
 
     return _make

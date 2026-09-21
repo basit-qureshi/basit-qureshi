@@ -41,6 +41,11 @@ export default function App() {
   const [tab, setTab] = useState("dashboard");
   const [toasts, setToasts] = useState([]);
   const prevTradesRef = useRef(null);
+  // Highest snapshot sequence accepted so far, and the account it described.
+  // A poll and a WebSocket tick race constantly; without this an older
+  // observation can overwrite a newer one, and an account switch can merge two
+  // accounts' numbers into one screen.
+  const snapshotRef = useRef({ seq: -1, account: null });
 
   const pushToast = useCallback((kind, title, body) => {
     const id = `${Date.now()}-${Math.random()}`;
@@ -103,6 +108,27 @@ export default function App() {
     }
   }, [filters, page, announceTradeChanges]);
 
+  // Returns false for an observation that is older than one already shown, or
+  // that describes a different account than the screen is currently showing.
+  const acceptSnapshot = useCallback((payload) => {
+    const seq = payload?.snapshot_seq;
+    const account = payload?.observation_account_id ?? null;
+    const seen = snapshotRef.current;
+    if (account !== seen.account) {
+      // A genuine account change resets the ordering rather than being merged
+      // into the previous account's numbers.
+      snapshotRef.current = { seq: typeof seq === "number" ? seq : -1, account };
+      setOpenTrades(null);
+      setLiveOpenPositions(null);
+      setGrid(null);
+      return true;
+    }
+    if (typeof seq !== "number") return true;
+    if (seq <= seen.seq) return false;
+    snapshotRef.current = { seq, account };
+    return true;
+  }, []);
+
   const refresh = useCallback(async () => {
     try {
       const [s, st, open, days] = await Promise.all([
@@ -111,6 +137,7 @@ export default function App() {
         api.getOpenTrades().catch(() => null),
         api.getTradingDays().catch(() => null),
       ]);
+      if (!acceptSnapshot(s)) return;
       setStatus(s);
       setStats(st);
       if (open) setOpenTrades(open);
@@ -120,7 +147,7 @@ export default function App() {
     } catch (err) {
       setGlobalError(err.message);
     }
-  }, []);
+  }, [acceptSnapshot]);
 
   // Re-runs whenever a filter or the page changes, and on the poll below.
   useEffect(() => {
@@ -142,17 +169,19 @@ export default function App() {
       loadTradesRef.current();
     }, 5000);
     const disconnect = connectWebSocket((payload) => {
-      if (payload.type === "tick") {
-        setLiveAccount({ balance: payload.balance, equity: payload.equity, currency: "USD", leverage: 0 });
-        setLiveOpenPositions(payload.open_positions || []);
-        setGrid(payload.grid || null);
-      }
+      if (payload.type !== "tick") return;
+      if (!acceptSnapshot(payload)) return;
+      setLiveAccount({ balance: payload.balance, equity: payload.equity, currency: "USD", leverage: 0 });
+      // An unreadable position list is null, not an empty array, so the panel
+      // can say "unknown" rather than draw a confident zero.
+      setLiveOpenPositions(payload.positions_known === false ? null : payload.open_positions || []);
+      setGrid(payload.grid || null);
     });
     return () => {
       clearInterval(interval);
       disconnect();
     };
-  }, [refresh]);
+  }, [refresh, acceptSnapshot]);
 
   // Changing a filter always returns to page 1: staying on page 7 of a
   // selection that now has two pages would show an empty screen.
@@ -188,9 +217,51 @@ export default function App() {
   async function handleStop() {
     setBusy(true);
     try {
-      await api.stop();
+      const result = await api.stop();
       await refresh();
-      pushToast("info", "Bot stopped", "No new trades will be opened");
+      // The server says what is actually still open. Reporting "no new trades
+      // will be opened" and nothing else was true but badly incomplete: with
+      // the loop stopped, nothing closes what is already there either.
+      pushToast(result.flat ? "info" : "loss", result.flat ? "Bot stopped" : "Stopped with exposure open", result.message);
+    } catch (err) {
+      setGlobalError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handlePauseEntries() {
+    setBusy(true);
+    try {
+      const result = await api.pauseEntries();
+      await refresh();
+      pushToast("info", "Entries paused", result.message);
+    } catch (err) {
+      setGlobalError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleResumeEntries() {
+    setBusy(true);
+    try {
+      const result = await api.resumeEntries();
+      await refresh();
+      pushToast("info", "Entries resumed", result.message);
+    } catch (err) {
+      pushToast("loss", "Not resumed", err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleCloseAndPause() {
+    setBusy(true);
+    try {
+      const result = await api.closeAndPause();
+      await refresh();
+      pushToast(result.ok ? "info" : "loss", "Close requested", result.message);
     } catch (err) {
       setGlobalError(err.message);
     } finally {
@@ -239,7 +310,16 @@ export default function App() {
 
       {globalError && <div className="global-error">⚠ {globalError}</div>}
 
-      <StatusBar status={status} onStart={handleStart} onStop={handleStop} onModeChange={handleModeChange} busy={busy} />
+      <StatusBar
+        status={status}
+        onStart={handleStart}
+        onStop={handleStop}
+        onModeChange={handleModeChange}
+        onPauseEntries={handlePauseEntries}
+        onResumeEntries={handleResumeEntries}
+        onCloseAndPause={handleCloseAndPause}
+        busy={busy}
+      />
 
       {tab === "dashboard" && (
         <>

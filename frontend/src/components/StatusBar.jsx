@@ -1,13 +1,20 @@
 import { useState } from "react";
 import ConfirmModal from "./ConfirmModal";
 
-export default function StatusBar({ status, onStart, onStop, onModeChange, busy }) {
+export default function StatusBar({
+  status, onStart, onStop, onModeChange, onPauseEntries, onResumeEntries, onCloseAndPause, busy,
+}) {
   const [pendingRealConfirm, setPendingRealConfirm] = useState(false);
   const [pendingStartConfirm, setPendingStartConfirm] = useState(false);
+  const [pendingStopConfirm, setPendingStopConfirm] = useState(false);
+  const [pendingCloseConfirm, setPendingCloseConfirm] = useState(false);
 
   if (!status) return null;
 
-  const { running, mode, connected, symbol, timeframe, last_error, strategy_name, daily_target_hit } = status;
+  const {
+    running, mode, connected, symbol, timeframe, last_error, strategy_name, daily_target_hit,
+    entries_paused, pause_reason, close_intent, persistence_error,
+  } = status;
 
   // Named by the engine from the strategy object it is actually holding, not
   // from the settings dict — so a saved setting that quietly disagrees with the
@@ -52,14 +59,39 @@ export default function StatusBar({ status, onStart, onStop, onModeChange, busy 
           {mode === "real" ? "REAL MONEY" : "DEMO"}
         </span>
         {daily_target_hit && <span className="tone-green">✓ Daily target reached — halted for this broker day</span>}
+        {entries_paused && (
+          <span className="tone-amber">⏸ Entries paused{pause_reason ? ` — ${pause_reason}` : ""}. Open positions are still managed.</span>
+        )}
+        {close_intent && close_intent.state !== "DONE" && (
+          <span className="error-text">
+            ⏳ Closing ({close_intent.state}, attempt {close_intent.attempts}) — {close_intent.reason}
+          </span>
+        )}
+        {persistence_error && <span className="error-text">⚠ {persistence_error}</span>}
         {last_error && <span className="error-text">⚠ {last_error}</span>}
       </div>
       <div className="status-right">
         <button className="btn btn-ghost" disabled={running || busy} onClick={handleModeToggle}>
           Switch to {mode === "demo" ? "Real" : "Demo"}
         </button>
+        {/* Three distinct actions, because they do three different things.
+            Pause keeps protecting. Close flattens this bot's own exposure.
+            Stop ends the management loop and protects nothing after that. */}
+        {running && !entries_paused && (
+          <button className="btn btn-ghost" disabled={busy} onClick={onPauseEntries}>
+            Pause entries
+          </button>
+        )}
+        {running && entries_paused && (
+          <button className="btn btn-ghost" disabled={busy} onClick={onResumeEntries}>
+            Resume entries
+          </button>
+        )}
+        <button className="btn btn-ghost" disabled={busy} onClick={() => setPendingCloseConfirm(true)}>
+          Close positions
+        </button>
         {running ? (
-          <button className="btn btn-danger" disabled={busy} onClick={onStop}>
+          <button className="btn btn-danger" disabled={busy} onClick={() => setPendingStopConfirm(true)}>
             Stop Bot
           </button>
         ) : (
@@ -80,6 +112,43 @@ export default function StatusBar({ status, onStart, onStop, onModeChange, busy 
             setPendingRealConfirm(false);
           }}
           onCancel={() => setPendingRealConfirm(false)}
+        />
+      )}
+
+      {pendingStopConfirm && (
+        <ConfirmModal
+          title="Stop the management loop?"
+          message={
+            "Stop ends the loop that watches this bot's positions. After it stops, the basket target, " +
+            "the basket stop, the daily loss limit and the drawdown limit are NO LONGER CHECKED, and any " +
+            "open positions stay live at the broker with nothing closing them. " +
+            "To keep protection running while opening nothing new, use Pause entries. " +
+            "To end the exposure, use Close positions first."
+          }
+          confirmLabel="Yes, stop watching"
+          danger
+          onConfirm={() => {
+            onStop();
+            setPendingStopConfirm(false);
+          }}
+          onCancel={() => setPendingStopConfirm(false)}
+        />
+      )}
+
+      {pendingCloseConfirm && (
+        <ConfirmModal
+          title="Close this bot's positions?"
+          message={
+            "This closes only positions and orders carrying this bot's magic number. Manual trades and " +
+            "other programs are not touched. It stays active until the broker confirms nothing is left."
+          }
+          confirmLabel="Yes, close and pause"
+          danger
+          onConfirm={() => {
+            onCloseAndPause();
+            setPendingCloseConfirm(false);
+          }}
+          onCancel={() => setPendingCloseConfirm(false)}
         />
       )}
 

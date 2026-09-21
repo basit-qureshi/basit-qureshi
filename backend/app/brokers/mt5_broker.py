@@ -84,13 +84,51 @@ class MT5Broker(BrokerAdapter):
         info = self._mt5.account_info()
         if info is None:
             raise RuntimeError(f"MT5 account_info() failed: {self._mt5.last_error()}")
+        # Every field below is read with getattr and defaults to None when the
+        # terminal did not supply it. A missing margin figure has to reach the
+        # engine AS missing: the admission check refuses on unknown, and that
+        # only works if nothing invents a number here.
+        def _num(name):
+            value = getattr(info, name, None)
+            return float(value) if isinstance(value, (int, float)) else None
+
+        margin_mode = getattr(info, "margin_mode", None)
+        hedging = None
+        if margin_mode is not None:
+            hedging = margin_mode == self._mt5.ACCOUNT_MARGIN_MODE_RETAIL_HEDGING
+
         return AccountInfo(
             balance=info.balance, equity=info.equity, currency=info.currency, leverage=info.leverage,
             account_id=f"mt5:{info.server}:{info.login}",
             trade_mode={self._mt5.ACCOUNT_TRADE_MODE_DEMO: "demo",
-                        self._mt5.ACCOUNT_TRADE_MODE_REAL: "real"}.get(info.trade_mode, "unknown"),
-            hedging=info.margin_mode == self._mt5.ACCOUNT_MARGIN_MODE_RETAIL_HEDGING,
+                        self._mt5.ACCOUNT_TRADE_MODE_REAL: "real"}.get(
+                            getattr(info, "trade_mode", None), "unknown"),
+            hedging=hedging,
+            free_margin=_num("margin_free"),
+            margin=_num("margin"),
+            margin_level=_num("margin_level"),
+            trade_allowed=getattr(info, "trade_allowed", None),
+            broker_id=getattr(info, "company", None) or getattr(info, "server", None),
         )
+
+    @_synchronized
+    def calc_margin(self, symbol: str, side, volume: float, price: float) -> float | None:
+        """Margin for ONE proposed order, from MT5's own calculation.
+
+        order_calc_margin covers only the operation it is asked about. It knows
+        nothing about positions already open or orders already resting, so the
+        caller reconciles those itself rather than treating this as a portfolio
+        answer.
+        """
+        mt5 = self._mt5
+        order_type = mt5.ORDER_TYPE_BUY if getattr(side, "value", side) == "BUY" else mt5.ORDER_TYPE_SELL
+        try:
+            self._ensure_symbol_selected(symbol)
+            value = mt5.order_calc_margin(order_type, symbol, volume, price)
+        except Exception:
+            logger.exception("order_calc_margin failed for %s %s %s", symbol, side, volume)
+            return None
+        return float(value) if isinstance(value, (int, float)) else None
 
     def _ensure_symbol_selected(self, symbol: str) -> None:
         """Historical/tick data calls can fail with 'Terminal: Call failed' if the

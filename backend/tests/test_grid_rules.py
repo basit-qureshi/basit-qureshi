@@ -75,7 +75,12 @@ def test_basket_holds_at_one_cent_short_and_closes_at_the_target(broker, engine_
 def test_basket_stop_loss_closes_the_group(broker, engine_factory):
     # $60 budget: a full 10+10 grid at 0.30 spacing freezes around -$37.80 once
     # both sides fill, so a $5 stop could never let this grid be built.
-    e = engine_factory(basket_take_profit_usd=1000.0, basket_stop_loss_usd=60.0)
+    # The daily limit is lifted here on purpose: this scenario's floating loss
+    # also breaches the default $100 daily limit, and with the daily reading now
+    # including floating exposure the daily halt would fire first and this test
+    # would be measuring that instead of the basket stop.
+    e = engine_factory(basket_take_profit_usd=1000.0, basket_stop_loss_usd=60.0,
+                       max_daily_loss_usd=10_000.0)
     armed(broker, e)
     broker.price = 4004.0   # fill the buy side
     broker.next_candle()

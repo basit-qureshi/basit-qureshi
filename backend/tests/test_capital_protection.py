@@ -88,7 +88,10 @@ def test_a_failed_risk_close_is_retried_until_flat(broker, engine_factory, monke
         return real_close(ticket)
 
     monkeypatch.setattr(broker, "close_position", flaky_close)
-    e._day_realized = -6.0       # past the 5.00 daily loss limit
+    # A real marked loss, not a poke at an internal counter: the daily limit is
+    # now judged on settled trades plus the change in open mark, so moving the
+    # price is what puts the day past its limit.
+    broker.price -= 12.0         # the filled buy side is now well under water
 
     broker.next_candle()
     e._tick()                    # halts, tries to close, every close fails
@@ -115,7 +118,10 @@ def test_a_risk_halt_survives_a_restart(broker, engine_factory):
     Otherwise the protection lasts exactly as long as the process does."""
     e = engine_factory(basket_take_profit_usd=1000.0, max_daily_loss_usd=5.0)
     armed(broker, e)
-    e._day_realized = -6.0
+    broker.price += 4.0          # fill the buy side
+    broker.next_candle()
+    e._tick()
+    broker.price -= 12.0         # and drive the day past its limit on the mark
     broker.next_candle()
     e._tick()
     assert e._halt_reason is not None

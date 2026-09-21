@@ -18,6 +18,9 @@ export const api = {
     request("/api/start", { method: "POST", body: JSON.stringify({ confirm_real: confirmReal }) }),
   stop: () => request("/api/stop", { method: "POST" }),
   clearHalt: () => request("/api/clear-halt", { method: "POST" }),
+  pauseEntries: () => request("/api/pause-entries", { method: "POST" }),
+  resumeEntries: () => request("/api/resume-entries", { method: "POST" }),
+  closeAndPause: () => request("/api/close-and-pause", { method: "POST" }),
   // Every filter is optional; blanks are dropped so the query string only
   // carries what was actually chosen.
   getTrades: (params = {}) => {

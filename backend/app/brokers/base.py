@@ -30,13 +30,37 @@ class PendingOrder:
 
 @dataclass
 class AccountInfo:
+    """What the broker says about the account.
+
+    Every field that the engine is allowed to make a decision on is `None` when
+    the broker did not supply it, never a convenient default. The previous
+    model had no `free_margin` field at all, so the admission check read it with
+    `getattr(account, "free_margin", None)` and silently passed every time.
+    A missing value must block admission, not sail through it.
+    """
+
     balance: float
     equity: float
     currency: str
     leverage: int
     account_id: str = "legacy"
-    trade_mode: str = "demo"
-    hedging: bool = True
+    # "demo", "real", "contest" or "unknown" — the BROKER's own classification,
+    # not the app's mode setting. They are different things and only this one
+    # is authoritative.
+    trade_mode: str = "unknown"
+    # None means the broker did not say. Netting vs hedging changes what a
+    # two-sided grid even costs in margin, so it is not assumed.
+    hedging: bool | None = None
+    free_margin: float | None = None
+    margin: float | None = None
+    margin_level: float | None = None
+    # Whether the broker currently permits this account to trade at all.
+    trade_allowed: bool | None = None
+    broker_id: str | None = None
+
+    @property
+    def identity_known(self) -> bool:
+        return self.trade_mode in ("demo", "real") and bool(self.account_id)
 
 
 @dataclass
@@ -70,6 +94,12 @@ class SymbolInfo:
     volume_step: float
     min_stop_distance: float = 0.0  # broker's minimum SL/TP distance from price, in price units
     spread: float = 0.0  # current ask - bid, in price units
+    # Whether the broker's reported floating profit is already struck at the
+    # executable closing side (bid for a long, ask for a short). When it is,
+    # subtracting a further half-spread per position double-counts the exit.
+    # None means nobody has verified it for this adapter, and an unverified
+    # semantic must not be presented as a conservative guarantee.
+    profit_includes_exit_spread: bool | None = None
 
 
 class BrokerAdapter(ABC):
@@ -154,3 +184,18 @@ class BrokerAdapter(ABC):
         """Actual realized profit of a closed position (including commission/swap
         where the broker reports them), or None if the broker can't tell."""
         ...
+
+    # --- optional capabilities ------------------------------------------------
+    # Adapters that cannot provide these simply do not implement them. The
+    # engine treats absence as "unknown" and refuses to admit new exposure on
+    # it, rather than assuming a comfortable value.
+
+    def calc_margin(self, symbol: str, side: OrderSide, volume: float, price: float) -> float | None:
+        """Margin the broker would require for ONE proposed operation.
+
+        MT5's order_calc_margin answers exactly this and nothing more: it does
+        not account for positions already open or orders already resting. The
+        caller must reconcile those separately. None means the broker could not
+        be asked.
+        """
+        return None

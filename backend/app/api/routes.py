@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timedelta, timezone
 import pandas as pd
 from fastapi import APIRouter, HTTPException
@@ -10,6 +11,8 @@ from app.brokers.base import OrderSide, PendingType
 from app import db as db_module
 from app.db import TradeRecord
 from app.strategy.indicators import ema
+
+logger = logging.getLogger("api")
 
 router = APIRouter(prefix="/api")
 
@@ -55,10 +58,31 @@ async def get_status():
     return {**engine.status(), "settings": bot_manager.settings, "account": account}
 
 
+def _require_verified_account(engine):
+    """Every entry path checks the BROKER's account classification.
+
+    The app's demo/real setting is a local string and has never been evidence
+    of what the terminal is logged into. A real account behind a "demo" label
+    is refused here, on the manual test order as well as on Start, and an
+    unknown classification is refused rather than assumed harmless.
+    """
+    if not engine.broker.is_connected():
+        engine.broker.connect()
+    try:
+        account = engine.broker.get_account_info()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Could not read the account: {exc}")
+    verdict = engine.verify_account(account)
+    if not verdict.allowed:
+        raise HTTPException(status_code=403, detail=verdict.reason)
+    return account
+
+
 @router.post("/start")
 async def start_bot(body: StartRequest):
     # Must run on the main event loop (not FastAPI's sync threadpool) since
     # engine.start() schedules an asyncio task on the currently running loop.
+    _require_verified_account(bot_manager.engine)
     try:
         bot_manager.engine.start(confirm_real=body.confirm_real)
     except PermissionError as exc:
@@ -81,8 +105,47 @@ async def clear_halt():
 
 @router.post("/stop")
 async def stop_bot():
-    bot_manager.engine.stop()
-    return {"ok": True}
+    """Compatibility endpoint for the original Stop button.
+
+    Stop cancels the MANAGEMENT LOOP. With it cancelled the basket target, the
+    basket stop, the daily limit and the drawdown limit are all no longer
+    evaluated, while any positions stay live at the broker. The response says
+    exactly what is left open so no caller can present this as a flat account.
+    Callers that want protection to continue should use /api/pause-entries;
+    callers that want the exposure gone should use /api/close-and-pause.
+    """
+    flat, message = bot_manager.engine.stop()
+    return {"ok": True, "flat": flat, "message": message}
+
+
+@router.post("/pause-entries")
+async def pause_entries():
+    """Stop opening new exposure while continuing to manage and protect what is
+    already open. Cancels resting entry orders and re-reads the result, since a
+    stop can fill in the moment between reading and cancelling."""
+    ok, message = bot_manager.engine.pause_entries()
+    return {"ok": ok, "message": message}
+
+
+@router.post("/resume-entries")
+async def resume_entries():
+    """Owner action. Refuses while a halt or an unfinished close stands."""
+    ok, message = bot_manager.engine.resume_entries()
+    if not ok:
+        raise HTTPException(status_code=409, detail=message)
+    return {"ok": True, "message": message}
+
+
+@router.post("/close-and-pause")
+async def close_and_pause():
+    """Flatten this bot's own positions and orders, then stay paused.
+
+    Only this bot's magic number is touched; a manual trade is never closed by
+    this. It remains active across polls until the broker confirms flat, so a
+    single failed attempt does not end it.
+    """
+    ok, message = bot_manager.engine.close_and_pause()
+    return {"ok": ok, "message": message}
 
 
 def _trade_json(r: TradeRecord) -> dict:
@@ -258,10 +321,15 @@ async def get_open_trades():
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"could not read open positions: {exc}")
 
+    # A failed read is UNKNOWN, not zero. Rendering it as an empty list was how
+    # a disconnected terminal displayed as a confirmed flat account.
+    pendings_known = True
     try:
         pendings = engine.broker.get_pending_orders(engine.symbol, magic=engine.magic_number)
-    except Exception:
+    except Exception as exc:
+        logger.warning("pending orders could not be read: %s", exc)
         pendings = []
+        pendings_known = False
 
     opened_at = {}
     with db_module.SessionLocal() as session:
@@ -297,21 +365,30 @@ async def get_open_trades():
     exit_cost = engine._estimated_exit_cost(positions)
     return {
         "connected": True,
+        **engine._observation_header(),
+        "positions_known": True,
+        "pending_orders_known": pendings_known,
         "positions": items,
-        "pending_orders": len(pendings),
-        "buy_stops": sum(1 for o in pendings if o.order_type == PendingType.BUY_STOP),
-        "sell_stops": sum(1 for o in pendings if o.order_type == PendingType.SELL_STOP),
+        "pending_orders": len(pendings) if pendings_known else None,
+        "buy_stops": sum(1 for o in pendings if o.order_type == PendingType.BUY_STOP) if pendings_known else None,
+        "sell_stops": sum(1 for o in pendings if o.order_type == PendingType.SELL_STOP) if pendings_known else None,
         "totals": {
             "count": len(items),
             "volume": round(sum(i["volume"] for i in items), 2),
             "gross_profit": gross,
             "net_profit": net,
+            # None when it could not be estimated. Never 0.0 as a stand-in:
+            # returning zero for missing cost data is what made the reading
+            # least conservative exactly when the data was worst.
             "estimated_exit_cost": exit_cost,
-            # What the basket rule is actually judged on.
-            "after_exit_cost": round(net - exit_cost, 2),
+            "exit_cost_known": exit_cost is not None,
+            # The value the basket target is judged on, under the same contract
+            # the engine uses.
+            "after_exit_cost": round(net - (exit_cost or 0.0), 2),
             "costs_known": costs_known,
             "target": engine.basket_take_profit_usd,
         },
+        "day_risk": engine._day_risk(positions).as_dict(),
     }
 
 
@@ -452,12 +529,13 @@ def test_order(body: TestOrderRequest):
     if body.side not in ("BUY", "SELL"):
         raise HTTPException(status_code=400, detail="side must be 'BUY' or 'SELL'")
     engine = bot_manager.engine
+    # Manual ownership of the order is not permission to skip the account
+    # check: the danger is the same whoever pressed the button.
+    _require_verified_account(engine)
     if engine.mode == "real" and not body.confirm_real:
         raise HTTPException(
             status_code=403, detail="Placing a manual order on a REAL account requires confirm_real=true"
         )
-    if not engine.broker.is_connected():
-        engine.broker.connect()
 
     side = OrderSide.BUY if body.side == "BUY" else OrderSide.SELL
     try:

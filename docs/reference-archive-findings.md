@@ -26,12 +26,12 @@ is the setting in use.
 
 | Claim | Where it comes from | What the files actually say |
 | --- | --- | --- |
-| One trade per day, one at a time | every MT5 preset | `iMaxTradesDaily=1` in 24 of 24, `iMaxTradesAtOnce=1` in 24 of 24 |
-| Fixed daily and overall drawdown ceiling | every MT5 preset | `iDailyDrawdown=4` in 23 of 24 (one outlier at 100), `iOverallDrawdown=8` in 23 of 24 (one at 10) |
+| Two settings named `iMaxTradesDaily` and `iMaxTradesAtOnce` are both 1 | every MT5 preset | `iMaxTradesDaily=1` in 24 of 24, `iMaxTradesAtOnce=1` in 24 of 24. **What "1" counts is not documented anywhere in the archive.** It may mean one position in total, one basket, one entry signal, or something else. It is NOT evidence that grid management is absent — 20 of the 24 presets set `iUseGrid=true`. |
+| Drawdown VALUES are stored | every MT5 preset | `iDailyDrawdown=4` in 23 of 24 (one outlier at 100), `iOverallDrawdown=8` in 23 of 24 (one at 10). **Stored is not enforced.** All 24 also set `iUseAdvancedRisk=false`, and whether these values depend on that flag cannot be resolved without the EA. They must not be described as active ceilings. |
 | Risk is sized against a capped capital base, not the live balance | every MT5 preset | `iMaxCapital=10000` in 18, `11000` in 3, `111000` in 3, `10000.0` in 1 |
 | Entry is confined to a short daily window after a measured range | every MT5 preset + `!README.txt` per folder | `iRangeMinutes` 10–150, then `iTradeSessionMinutes` 20–360 |
 | "Advanced risk management" ships **off** | every MT5 preset | `iUseAdvancedRisk=false` in 24 of 24 |
-| The archive's "grid" is not a 10+10 pending grid | presets + README | `iUseGrid=true` in 20 of 24, but `iMaxGridLevels=0` in all 11 files that set it, and `iMaxTradesAtOnce=1` everywhere |
+| Grid management is ENABLED in most presets | presets + README | `iUseGrid=true` in 20 of 24, false in 4. `iMaxGridLevels=0` in all 11 files that set it — and what 0 means (unlimited, disabled, EA default) is undocumented. No conclusion about the shape of its grid is available from the archive. |
 | Grid replaces the stop loss rather than adding to it | `MT5/Sets/low-frequency/g_XAUUSD Asia/!README.txt` | "Instead of a fixed stop loss, position management is handled through grid logic... If you want to enforce strict risk limits, you can enable the Advanced Risk Management feature" |
 | Reported results assume costs this bot has not measured | `.../Report Tester/Backtest settings.txt` | "Commission: 2.75$ per lot ($5.5 round turn)", "Modelling: 1 minute OHLC", "Leverage: 1:500", "Latency: 1000ms" |
 
@@ -79,14 +79,20 @@ strength of a description. It is not an accusation about the product.
 
 Worth taking — and all of it is about bounding loss, not about predicting price:
 
-1. **A hard daily drawdown ceiling and a separate overall one.** Two numbers,
-   both always on, in every single preset. This bot has the equivalent controls;
-   the owner has not yet set the numbers.
+1. **The SHAPE of having a daily limit and a separate overall one.** Two
+   numbers appear in every preset. Whether that product enforces them is
+   unresolved here, so this is an idea worth having, not a validated setting to
+   copy. This bot has the equivalent controls; the owner has not set the numbers.
 2. **A capped capital base for sizing.** Risk computed against a fixed figure
    rather than a balance that grows after a good run.
-3. **One position at a time, one trade per day.** The opposite of a 20-order
-   grid. It is the clearest reason a published system can afford to sit out.
-4. **Entry confined to a measured window.** Not a signal — a schedule.
+3. **Entry confined to a measured window.** Not a signal — a schedule.
+
+An earlier version of this document claimed the reference system runs "one
+position at a time, no grid", and that its 4%/8% values are always-active
+ceilings. **Both claims were wrong** and are corrected above: 20 of 24 presets
+enable grid, a max-trade setting of 1 does not establish one total position
+across a grid, and a stored drawdown value alongside `iUseAdvancedRisk=false`
+does not establish enforcement. Nothing in this bot was built on those claims.
 
 Not worth taking, and deliberately not implemented:
 

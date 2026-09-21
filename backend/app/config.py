@@ -61,6 +61,12 @@ class Settings(BaseSettings):
     # With 50, a $100 account may accept at most a $50 basket stop. It is what
     # stops a small account from accepting a budget it cannot survive.
     grid_capital_reserve_percent: float = 50.0
+    # A persistent line under the account: no new grid is placed while the
+    # balance is at or below it. This is NOT the reserve above. The reserve is
+    # a share of the balance set aside for one proposed basket; the floor is
+    # the level the account must never be traded down past. 0 means the owner
+    # has not chosen one yet, and new entries stay blocked until they do.
+    grid_capital_floor_usd: float = 0.0
     # Tags every order so the bot manages only its own, leaving manual trades
     # and any other program alone.
     grid_magic_number: int = 990022

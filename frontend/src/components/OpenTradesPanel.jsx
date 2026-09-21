@@ -35,8 +35,12 @@ export default function OpenTradesPanel({ data }) {
         </div>
         <div className="open-summary-item">
           <span>Resting orders</span>
+          {/* A failed read is unknown, not zero. Drawing a confident "0 buy /
+              0 sell" over a broken link is how live orders became invisible. */}
           <b>
-            {data?.buy_stops ?? 0} buy / {data?.sell_stops ?? 0} sell
+            {data?.pending_orders_known === false
+              ? "unknown"
+              : `${data?.buy_stops ?? 0} buy / ${data?.sell_stops ?? 0} sell`}
           </b>
         </div>
         <div className="open-summary-item">
@@ -69,6 +73,11 @@ export default function OpenTradesPanel({ data }) {
         </p>
       )}
 
+      {data?.pending_orders_known === false && (
+        <p className="error-text">
+          ⚠ Resting orders could not be read. This panel cannot confirm what is still waiting at the broker.
+        </p>
+      )}
       {data?.connected === false && (
         <p className="error-text">Not connected to the broker — this panel cannot show live exposure.</p>
       )}

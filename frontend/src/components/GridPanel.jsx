@@ -46,6 +46,62 @@ export default function GridPanel({ grid, status , onClearHalt }) {
           )}
         </>
       )}
+      {status?.day_risk && (
+        <div className="risk-readout">
+          <div className="risk-heading">
+            Daily risk reading
+            <span className="muted"> · day cut on {status.accounting_timezone} time</span>
+          </div>
+          {/* These two are DIFFERENT measurements and are not expected to
+              agree while positions are open. The realised card is settled
+              trades only; the marked reading adds today's change in open
+              exposure, which is what the daily limit is judged on. */}
+          <dl className="risk-rows">
+            <div>
+              <dt>Settled today (realised)</dt>
+              <dd>${status.day_risk.settled_realized_usd?.toFixed(2)}</dd>
+            </div>
+            <div>
+              <dt>Open mark change today</dt>
+              <dd>${status.day_risk.open_mark_change_usd?.toFixed(2)}</dd>
+            </div>
+            {status.day_risk.pending_settlement_marked_usd !== 0 && (
+              <div>
+                <dt>Closed, not settled yet</dt>
+                <dd>${status.day_risk.pending_settlement_marked_usd?.toFixed(2)}</dd>
+              </div>
+            )}
+            <div className="risk-total">
+              <dt>Marked result (limit is judged on this)</dt>
+              <dd className={status.day_risk.marked_result_usd >= 0 ? "tone-green" : "tone-red"}>
+                ${status.day_risk.marked_result_usd?.toFixed(2)}
+              </dd>
+            </div>
+            <div>
+              <dt>Exit reserve (estimate, shown apart)</dt>
+              <dd>
+                {status.day_risk.exit_reserve_usd == null
+                  ? "unknown"
+                  : `$${status.day_risk.exit_reserve_usd.toFixed(2)}`}
+              </dd>
+            </div>
+            {status.daily_limit_remaining_usd != null && (
+              <div>
+                <dt>Daily limit remaining</dt>
+                <dd className={status.daily_limit_remaining_usd > 0 ? "" : "tone-red"}>
+                  ${status.daily_limit_remaining_usd.toFixed(2)}
+                </dd>
+              </div>
+            )}
+          </dl>
+          {status.day_risk.complete === false && (
+            <p className="error-text">
+              ⚠ Today's accounting is incomplete, so no new grid may be placed:{" "}
+              {status.day_risk.incomplete_reasons?.join("; ")}
+            </p>
+          )}
+        </div>
+      )}
       {grid?.last_event && <p className="cycle-event">{grid.last_event}</p>}
     </section>
   );

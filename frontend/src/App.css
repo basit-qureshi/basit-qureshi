@@ -595,3 +595,17 @@
   .reason-cell { max-width: 160px; }
   .pager { justify-content: center; }
 }
+
+/* ---- Daily risk readout --------------------------------------------------
+   The realised card and the marked reading are different measurements, so
+   they are labelled as such rather than styled to look interchangeable. */
+.risk-readout { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 12px; }
+.risk-heading { font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin-bottom: 8px; }
+.risk-heading .muted { text-transform: none; letter-spacing: 0; }
+.risk-rows { margin: 0; display: grid; gap: 5px; }
+.risk-rows div { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; }
+.risk-rows dt { color: var(--muted); min-width: 0; }
+.risk-rows dd { margin: 0; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.risk-total { border-top: 1px dashed var(--border); padding-top: 5px; margin-top: 3px; font-weight: 600; }
+.risk-total dt { color: var(--text); }
+.tone-amber { color: #e3b861; }

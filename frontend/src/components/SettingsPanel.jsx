@@ -39,6 +39,7 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
       grid_max_daily_loss_usd: Number(form.grid_max_daily_loss_usd),
       grid_max_equity_drawdown_percent: Number(form.grid_max_equity_drawdown_percent),
       grid_capital_reserve_percent: Number(form.grid_capital_reserve_percent),
+      grid_capital_floor_usd: Number(form.grid_capital_floor_usd),
       grid_magic_number: Number(form.grid_magic_number),
       grid_trading_start_hour: Number(form.grid_trading_start_hour),
       grid_trading_end_hour: Number(form.grid_trading_end_hour),
@@ -178,6 +179,20 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
             max="95"
             value={form.grid_capital_reserve_percent}
             onChange={(e) => update("grid_capital_reserve_percent", e.target.value)}
+          />
+        </label>
+        <label>
+          {/* A different question from the reserve above: the reserve is a
+              share of the balance set aside for ONE proposed basket; the floor
+              is the level the account must never be traded down past. */}
+          Capital floor ($, never trade below)
+          <input
+            disabled={running}
+            type="number"
+            step="1"
+            min="0"
+            value={form.grid_capital_floor_usd}
+            onChange={(e) => update("grid_capital_floor_usd", e.target.value)}
           />
         </label>
         <label>

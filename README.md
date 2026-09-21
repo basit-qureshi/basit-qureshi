@@ -76,11 +76,28 @@ basket target, same magic-number isolation.
 | Net basket accounting | The target and the stop are judged on profit after swap, commission and an estimated exit cost, not on the broker's gross figure. |
 | Retried risk closure | A limit breach keeps trying to close on every poll until the account is actually flat, instead of reporting "halted" once over live positions. |
 | Durable halt | A loss halt is written to the database, so restarting the backend or pressing Start does not clear it. Releasing it is an explicit owner action that refuses while any position or pending order is still open. |
-| Affordability check | Before placing a grid the bot prices the worst case — the configured basket stop, and the structural loss a fully filled 10+10 grid locks in — and refuses the grid if either does not fit inside the balance less `GRID_CAPITAL_RESERVE_PERCENT`. |
-| Loss limits required | With both the basket stop and the daily loss limit at 0 the bot places no new grid and says so. Open positions are still managed and still closed. |
+| Affordability check | Before placing a grid the bot prices a stated stress scenario — the configured basket stop, and the loss a fully filled 10+10 grid freezes at — and refuses if either does not fit inside the balance less `GRID_CAPITAL_RESERVE_PERCENT`. The completed-grid figure is **one scenario, not a proven maximum loss**: it does not cover gaps or one-sided runs. |
+| Capital floor | A separate, persistent line: no new grid while the balance is at or below `GRID_CAPITAL_FLOOR_USD`. Distinct from the reserve, which is a share of the balance set aside for one proposed basket. |
+| Margin admission | The broker's own `order_calc_margin` is asked for every proposed order and every already-resting one, and the total is compared against reported free margin. An unknown figure refuses. |
+| Account identity | Every entry path checks the **broker's** account classification, not the app's demo/real label. A real account behind a demo label is refused. |
+| Daily limit on the marked result | The daily loss limit is judged on settled trades plus today's change in open mark, so a floating loss counts the moment it exists. It survives a restart. |
+| Loss limits required | With both the basket stop and the daily loss limit at 0, or with no capital floor set, the bot places no new grid and says so. Open positions are still managed and still closed. |
+| Durable close intent | A loss exit is a recorded decision, not a one-shot call. It is retried until the broker confirms flat, survives a restart, and a later price recovery does not cancel it. |
 
 A refusal is always visible on the dashboard with its reason. The bot never
 raises risk or lowers a limit on its own to make a grid fit.
+
+**Stop, Pause and Close are three different things.** Pause entries keeps the
+management loop running and keeps protecting open positions. Close positions
+flattens only this bot's own exposure and then stays paused. Stop ends the
+management loop entirely — after it, nothing is monitored and nothing will
+close anything, and the response says exactly what was left open.
+
+**There is no broker-side stop loss.** Every protection here runs inside the
+Python process. If that process is killed, nothing in this bot protects the
+account. Whether to add individual broker SL is an unresolved owner decision,
+because the original specification asked for it and the locked strategy
+forbids per-trade SL/TP.
 
 ### The structural loss the affordability check prices
 

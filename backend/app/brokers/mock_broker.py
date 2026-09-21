@@ -93,7 +93,32 @@ class MockBroker(BrokerAdapter):
 
     def get_account_info(self) -> AccountInfo:
         equity = self._balance + sum(self._unrealized_profit(p) for p in self._positions.values())
-        return AccountInfo(balance=self._balance, equity=equity, currency=self._currency, leverage=self._leverage)
+        used = self._used_margin()
+        # A simulated broker genuinely knows its own margin, so it reports it
+        # rather than leaving it unknown. It is a demo account and says so:
+        # the engine compares this against the app's mode setting, and the two
+        # disagreeing is exactly the case that has to be caught.
+        return AccountInfo(
+            balance=self._balance, equity=equity, currency=self._currency, leverage=self._leverage,
+            trade_mode="demo", hedging=True, trade_allowed=True, broker_id="mock",
+            margin=round(used, 2),
+            free_margin=round(equity - used, 2),
+            margin_level=round(equity / used * 100, 2) if used > 0 else None,
+        )
+
+    def _used_margin(self) -> float:
+        return sum(
+            self._margin_for(p.symbol, p.volume, p.open_price) for p in self._positions.values()
+        )
+
+    def _margin_for(self, symbol: str, volume: float, price: float) -> float:
+        contract = 100.0 if symbol in _POINT_VALUE_PER_LOT else 100_000.0
+        return abs(volume) * contract * price / max(1, self._leverage)
+
+    def calc_margin(self, symbol: str, side, volume: float, price: float) -> float | None:
+        """Margin for one proposed order only, matching the real adapter's
+        contract: it says nothing about what is already open."""
+        return round(self._margin_for(symbol, volume, price), 2)
 
     def get_symbol_info(self, symbol: str) -> SymbolInfo:
         pip_size = _PIP_SIZES.get(symbol, 0.0001)
