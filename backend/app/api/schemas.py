@@ -21,6 +21,9 @@ class SettingsUpdate(BaseModel):
     grid_max_equity_drawdown_percent: float | None = None
     grid_capital_reserve_percent: float | None = None
     grid_capital_floor_usd: float | None = None
+    protective_poll_seconds: float | None = None
+    reporting_poll_seconds: float | None = None
+    broker_stall_after_ms: float | None = None
     grid_magic_number: int | None = None
     grid_trading_start_hour: int | None = None
     grid_trading_end_hour: int | None = None

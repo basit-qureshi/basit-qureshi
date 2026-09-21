@@ -67,6 +67,23 @@ class Settings(BaseSettings):
     # the level the account must never be traded down past. 0 means the owner
     # has not chosen one yet, and new entries stay blocked until they do.
     grid_capital_floor_usd: float = 0.0
+
+    # --- execution cadence (Phase B) -------------------------------------
+    # Protection runs on its own schedule, independent of the M1 candle
+    # boundary and of the dashboard refresh. Chosen from the offline
+    # benchmark: one protective cycle costs about 26 ms of in-process work
+    # against the stated per-call delays, so a 1 s cadence leaves the loop
+    # ~97% idle while still noticing a breach within a second of observing
+    # it. Lower it only with a measurement in hand; a busy loop against the
+    # terminal buys nothing and costs request budget.
+    protective_poll_seconds: float = 1.0
+    # History, settlement, chart data and the websocket frame. Slower on
+    # purpose, and skipped rather than queued when protective work is waiting.
+    reporting_poll_seconds: float = 5.0
+    # How long a single broker call may be in flight before the bot reports
+    # itself blocked and refuses new exposure. It never cancels or duplicates
+    # the call - a synchronous terminal call cannot be cancelled by a thread.
+    broker_stall_after_ms: float = 4000.0
     # Tags every order so the bot manages only its own, leaving manual trades
     # and any other program alone.
     grid_magic_number: int = 990022

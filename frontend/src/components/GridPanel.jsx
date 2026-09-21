@@ -102,6 +102,48 @@ export default function GridPanel({ grid, status , onClearHalt }) {
           )}
         </div>
       )}
+      {status?.broker_owner && (
+        <div className="risk-readout">
+          <div className="risk-heading">Execution health</div>
+          <dl className="risk-rows">
+            <div>
+              <dt>Protective check every</dt>
+              <dd>{status.protective_poll_seconds}s{status.protective_backoff_seconds > 0
+                ? ` (backing off to ${status.protective_backoff_seconds}s)` : ""}</dd>
+            </div>
+            <div>
+              <dt>Reporting every</dt>
+              <dd>{status.reporting_poll_seconds}s</dd>
+            </div>
+            <div>
+              {/* Local age from a monotonic clock. NOT a network latency
+                  figure: the terminal's clock and this machine's are not
+                  synchronised, so their difference is not measurable delay. */}
+              <dt>Last quote age (local clock)</dt>
+              <dd>{status.quote_missing
+                ? "no quote"
+                : status.quote_local_age_ms == null ? "—" : `${Math.round(status.quote_local_age_ms)} ms`}</dd>
+            </div>
+            {status.reporting_cycles_skipped > 0 && (
+              <div>
+                <dt>Reporting cycles skipped</dt>
+                <dd>{status.reporting_cycles_skipped}</dd>
+              </div>
+            )}
+          </dl>
+          {status.broker_owner.blocked && (
+            <p className="error-text">
+              ⛔ A broker call ({status.broker_owner.in_flight}) has been running for{" "}
+              {(status.broker_owner.in_flight_ms / 1000).toFixed(1)}s and has not returned.
+              No new exposure until it does, and no second request is sent while the first
+              may still reach the broker.
+            </p>
+          )}
+          {status.broker_owner.last_error && !status.broker_owner.blocked && (
+            <p className="muted">Last broker error: {status.broker_owner.last_error}</p>
+          )}
+        </div>
+      )}
       {grid?.last_event && <p className="cycle-event">{grid.last_event}</p>}
     </section>
   );
