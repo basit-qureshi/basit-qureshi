@@ -1107,6 +1107,15 @@ class GridEngine:
         """
         self._entry_unknowns = ()
 
+        # A halt outranks every other answer this gate can give. The live loop
+        # also returns early while halted, but the gate is the function that
+        # answers "may a new basket be created at all", and it returned True
+        # during a halt — correct only because something else happened to
+        # check first. Any other caller (a research profile, the admission
+        # path, a UI preview) would have been told the wrong thing.
+        if self._halt_reason:
+            return False, f"HALTED: {self._halt_reason}"
+
         if self._persist_failed:
             return False, f"NO_TRADE: {self._persist_failed}"
 
@@ -1924,6 +1933,12 @@ class GridEngine:
             # --- execution health (Phase B) ---------------------------------
             "broker_owner": self._owner.snapshot_health().as_dict(),
             "protective_poll_seconds": self.protective_poll_seconds,
+            # Phase B replaced this with the two cadences above. It is still
+            # accepted so an existing settings file keeps loading, but it no
+            # longer drives anything and the dashboard says so rather than
+            # letting an owner change it and wonder why nothing happened.
+            "poll_interval_seconds_retired": True,
+            "poll_interval_seconds_value": self.poll_interval_seconds,
             "reporting_poll_seconds": self.reporting_poll_seconds,
             "protective_backoff_seconds": self._protective_backoff,
             "reporting_cycles_skipped": self._reporting_overruns,
