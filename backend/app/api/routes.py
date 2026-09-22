@@ -492,6 +492,40 @@ def get_candles(count: int = 200):
     }
 
 
+@router.get("/ai-status")
+def get_ai_status():
+    """What the AI layer is doing, which is nothing by default.
+
+    AI mode is DISABLED unless explicitly selected. Shadow mode records
+    predictions and changes no order, no risk setting and no baseline
+    decision. There is no mode in which a model can turn a deterministic
+    block into an allow.
+    """
+    from app.ai.contracts import AIMode
+    from app.ai.features import FEATURE_SCHEMA
+    from app.news.extraction import NullExtractor
+    from app.ai.monitoring import RULES
+
+    extractor = NullExtractor()
+    return {
+        "mode": AIMode.DISABLED.value,
+        "available_modes": [AIMode.DISABLED.value, AIMode.SHADOW.value],
+        "gating_selectable": False,
+        "model_loaded": False,
+        "model_reason": "no trained model exists: there is no market data to train on",
+        "feature_schema": FEATURE_SCHEMA.as_dict(),
+        "news_provider": {"configured": False,
+                          "reason": "no provider selected; local file adapter available"},
+        "llm_extraction": extractor.health(),
+        "drift_rules": RULES,
+        "note": (
+            "AI cannot place an order, choose a direction, change the lot or spacing, "
+            "move a stop, or release an entry block. Protective exits are deterministic "
+            "and never consult a model."
+        ),
+    }
+
+
 @router.get("/research-profiles")
 def get_research_profiles():
     """The named, versioned profiles and which one is actually live.
