@@ -1,7 +1,7 @@
 # Demo validation status — Phase F
 
-Branch `claude/forex-ai-trading-bot-izgn6l`. Source revision at the time of
-writing: `e9f1e21` plus this phase's commit. **Nothing has been pushed;
+Branch `claude/forex-ai-trading-bot-izgn6l`. Source revision: `6771366`
+(Phase F), on top of `e9f1e21` (Phase E). **Nothing has been pushed;
 `origin` is still at `1116af1`.** No terminal was connected, no order was
 placed, no session was recorded on a real account.
 
