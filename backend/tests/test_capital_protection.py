@@ -71,7 +71,9 @@ def test_basket_stop_measures_net_loss(broker, engine_factory):
 def test_a_failed_risk_close_is_retried_until_flat(broker, engine_factory, monkeypatch):
     """The dangerous case. The limit fires, the close fails, and on every later
     poll the bot reports itself halted while the positions are still live."""
-    e = engine_factory(basket_take_profit_usd=1000.0, max_daily_loss_usd=5.0)
+    # 40.00, not 5.00: a limit below the ~$37.80 a completed grid freezes at is
+    # refused at admission now, and this test is about the limit FIRING.
+    e = engine_factory(basket_take_profit_usd=1000.0, max_daily_loss_usd=40.0)
     armed(broker, e)
 
     broker.price += 4.0          # fill the buy side
@@ -88,6 +90,13 @@ def test_a_failed_risk_close_is_retried_until_flat(broker, engine_factory, monke
         return real_close(ticket)
 
     monkeypatch.setattr(broker, "close_position", flaky_close)
+    # Pull the sell side first. Left resting it fills on the way down and the
+    # basket freezes at the ~$37.80 a completed grid locks in - which admission
+    # now guarantees is INSIDE the daily budget, so a hedged basket can no
+    # longer reach the limit on its own. This test is about the limit firing,
+    # so the loss is kept directional.
+    for o in list(orders(broker)):
+        broker.cancel_pending_order(o.ticket)
     # A real marked loss, not a poke at an internal counter: the daily limit is
     # now judged on settled trades plus the change in open mark, so moving the
     # price is what puts the day past its limit.
@@ -116,17 +125,19 @@ def test_a_failed_risk_close_is_retried_until_flat(broker, engine_factory, monke
 def test_a_risk_halt_survives_a_restart(broker, engine_factory):
     """Pressing Start, or restarting the backend, must not clear a loss halt.
     Otherwise the protection lasts exactly as long as the process does."""
-    e = engine_factory(basket_take_profit_usd=1000.0, max_daily_loss_usd=5.0)
+    e = engine_factory(basket_take_profit_usd=1000.0, max_daily_loss_usd=40.0)
     armed(broker, e)
     broker.price += 4.0          # fill the buy side
     broker.next_candle()
     e._tick()
+    for o in list(orders(broker)):   # keep the loss directional, not frozen
+        broker.cancel_pending_order(o.ticket)
     broker.price -= 12.0         # and drive the day past its limit on the mark
     broker.next_candle()
     e._tick()
     assert e._halt_reason is not None
 
-    fresh = engine_factory(basket_take_profit_usd=1000.0, max_daily_loss_usd=5.0)
+    fresh = engine_factory(basket_take_profit_usd=1000.0, max_daily_loss_usd=40.0)
     for _ in range(3):
         broker.next_candle()
         fresh._tick()
@@ -173,3 +184,120 @@ def test_entries_are_blocked_until_loss_limits_are_configured(broker, engine_fac
     broker.next_candle()
     e._tick()
     assert orders(broker) == [], "traded with no basket stop, no daily loss limit and no drawdown limit"
+
+
+# --- D6: a grid that can only end by forcing a limit -------------------------
+#
+# Admission already refuses a grid whose completed-grid freeze is larger than
+# the BASKET budget ("the grid as configured cannot finish building without
+# breaching it"). The same sentence is true of the other two limits the owner
+# set, and nothing used to check them.
+
+
+def settled_loss(engine, amount: float) -> None:
+    """Puts a real settled loss on today's books for this engine's account."""
+    from app import db as db_module
+    from app.db import TradeRecord
+
+    with db_module.SessionLocal() as session:
+        session.add(TradeRecord(
+            account_id=engine._account_id, ticket=f"settled-{amount}", symbol="XAUUSD",
+            side="BUY", volume=0.01, open_price=4000.0, sl=0, tp=0, profit=amount,
+            mode="demo", status="CLOSED", magic=MAGIC, trading_day=engine._trading_day,
+        ))
+        session.commit()
+    engine._refresh_daily_totals()
+
+
+def test_a_grid_that_cannot_fit_the_remaining_daily_budget_is_refused(broker, engine_factory):
+    """The day has $15 left and a completed grid freezes at about $37.80.
+
+    Placing it means the basket's only possible ending is the daily limit
+    liquidating it, and a fast oscillation that fills both sides between two
+    protective cycles lands the day well past the limit before anything can
+    fire. The limit can only be honoured to within one tick's movement, so the
+    known freeze has to fit inside what is left of the budget.
+    """
+    e = engine_factory(basket_stop_loss_usd=60.0, max_daily_loss_usd=100.0)
+    e._protective_tick()                       # binds the account and the day
+    settled_loss(e, -85.0)                     # $15 of the budget left
+
+    allowed, reason = e._entry_gate(broker.get_account_info())
+    assert allowed is False
+    assert "loss budget" in reason and "37.80" in reason
+    assert orders(broker) == []
+
+
+def test_the_same_grid_is_allowed_while_the_budget_can_absorb_it(broker, engine_factory):
+    """The guard must bite only when it should: an untouched budget still trades."""
+    e = engine_factory(basket_stop_loss_usd=60.0, max_daily_loss_usd=100.0)
+    e._protective_tick()
+    settled_loss(e, -40.0)                     # $60 left, comfortably over the freeze
+
+    allowed, reason = e._entry_gate(broker.get_account_info())
+    assert allowed is True, reason
+
+
+def test_a_grid_that_would_break_the_capital_floor_is_refused(broker, engine_factory):
+    """The floor is the balance the account is not traded down past."""
+    broker.balance = 500.0
+    e = engine_factory(basket_stop_loss_usd=60.0, max_daily_loss_usd=1000.0,
+                       capital_floor_usd=470.0)         # $30 of headroom
+    e._protective_tick()
+
+    allowed, reason = e._entry_gate(broker.get_account_info())
+    assert allowed is False
+    assert "capital floor" in reason
+    assert orders(broker) == []
+
+
+# --- D7: a halted engine ignoring exposure that appears after its own close --
+def test_a_completed_close_releases_its_intent(broker, engine_factory):
+    e = engine_factory(basket_take_profit_usd=1000.0, max_daily_loss_usd=40.0)
+    armed(broker, e)
+    broker.price += 4.0
+    broker.next_candle()
+    e._tick()
+    for o in list(orders(broker)):
+        broker.cancel_pending_order(o.ticket)
+    broker.price -= 12.0
+    broker.next_candle()
+    e._tick()
+
+    assert e._halt_reason is not None
+    assert broker.get_open_positions("XAUUSD", magic=MAGIC) == []
+    assert e._close_intent is None, (
+        "a confirmed close left its intent attached; the re-open branch in "
+        "_check_risk_limits only fires when no intent is attached"
+    )
+
+
+def test_a_halted_engine_still_closes_exposure_that_appears_afterwards(broker, engine_factory):
+    """The state the bot must never ignore exposure in.
+
+    A cancel that is acknowledged while a fill is already in flight leaves a
+    position behind after the close confirmed flat. While a DONE intent stayed
+    attached, the halt path skipped re-opening a close and the position sat
+    there for as long as the halt lasted.
+    """
+    from app.brokers.base import OrderSide
+
+    e = engine_factory(basket_take_profit_usd=1000.0, max_daily_loss_usd=40.0)
+    armed(broker, e)
+    broker.price += 4.0
+    broker.next_candle()
+    e._tick()
+    for o in list(orders(broker)):
+        broker.cancel_pending_order(o.ticket)
+    broker.price -= 12.0
+    broker.next_candle()
+    e._tick()
+    assert e._halt_reason is not None and broker.get_open_positions("XAUUSD", magic=MAGIC) == []
+
+    broker.open_position(OrderSide.BUY, 0.01, magic=MAGIC)   # the late fill
+    assert broker.get_open_positions("XAUUSD", magic=MAGIC), "fixture: exposure must exist"
+
+    e._protective_tick()
+    assert broker.get_open_positions("XAUUSD", magic=MAGIC) == [], (
+        "a halted engine left exposure it owns open at the broker"
+    )

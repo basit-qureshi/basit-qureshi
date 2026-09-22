@@ -165,3 +165,23 @@ can proceed in parallel once the three risk numbers exist, but demo verifies
 *operation*, not edge.
 
 The next step is **not** another development phase.
+
+---
+
+## 7. Amendment — the Phase A–F audit (after Phase F)
+
+This ledger was written at `e9f1e21` against 283 tests. A later audit re-read
+the implementation instead of the reports and found **two defects this ledger
+marked verified**. The ledger is not rewritten; the rows are amended here.
+
+| Row | Was | Now |
+| --- | --- | --- |
+| 2 — entry admission refuses on unknowns | **IV** | **IV, widened.** It refused on unknowns but not on a *known* worst case that exceeded the remaining daily budget or the capital-floor headroom. `_affordability` now measures the completed-grid freeze against all three of the owner's limits, not just the basket budget |
+| 10 — loss exit durable | **IV** | **IV, corrected.** The exit itself was durable, but only the profit path retired a finished intent. After a stop or a risk halt a DONE intent stayed attached, and `_check_risk_limits` re-opens a close for live exposure only when no intent is attached — so a **halted** engine ignored exposure that appeared after its own close confirmed. The intent is now retired where it completes |
+| 11 — daily protection includes floating exposure | **IV** | **IV, and now enforceable.** The reading was right; the limit could still be overshot by a basket admitted in the knowledge that it could not fit inside what was left of the budget |
+
+Rows 23–26 are unchanged: no broker-side stop loss, no performance evidence,
+no trained model, no owner risk numbers. The counts in §3 of this document are
+historical; the current suite is **341 backend tests**.
+
+Detail, probes and the owner-facing consequence: `DEMO_VALIDATION_STATUS.md` §7.

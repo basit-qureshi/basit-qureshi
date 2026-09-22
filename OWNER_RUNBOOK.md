@@ -50,7 +50,7 @@ cd C:\Users\Home\Documents\basit-qureshi\backend
 .\venv\Scripts\python.exe -m pip install -r requirements.txt -r requirements-mt5.txt
 .\venv\Scripts\python.exe -m pytest -q
 ```
-Expect **336 passed**. Anything else, stop and send the output.
+Expect **341 passed**. Anything else, stop and send the output.
 
 ```powershell
 cd C:\Users\Home\Documents\basit-qureshi\frontend
@@ -345,9 +345,29 @@ These are yours. They are not values to invent.
 | Decision | Currently | Note |
 | --- | --- | --- |
 | `GRID_BASKET_STOP_LOSS_USD` | 0 | Must exceed the completed-grid scenario (≈ $37.80 at 10+10 / 0.01 / 0.30) or admission refuses with a stated reason |
-| `GRID_MAX_DAILY_LOSS_USD` | 100 | Judged on the **marked** daily result, floating loss included |
-| `GRID_CAPITAL_FLOOR_USD` | **0 — blocks all new entries** | The balance the account must never be traded down past |
+| `GRID_MAX_DAILY_LOSS_USD` | 100 | Judged on the **marked** daily result, floating loss included. Must **also** exceed ≈ $37.80 — see below |
+| `GRID_CAPITAL_FLOOR_USD` | **0 — blocks all new entries** | The balance the account must never be traded down past. The balance minus ≈ $37.80 must stay above it |
 | Broker-side SL | absent | The unresolved conflict: original spec asked for it, locked strategy forbids per-trade SL/TP |
+
+> **All three numbers are now measured against the same ≈ $37.80.** That figure
+> is what a fully filled 10+10 grid at 0.01 lots and 0.30 spacing locks in once
+> both sides fill: the basket stops responding to price and no recovery undoes
+> it. A budget smaller than that cannot be honoured, because a fast oscillation
+> can fill both sides between two protective cycles and land there before
+> anything can fire. Admission refuses such a grid and says so rather than
+> placing a basket whose only possible ending is a forced liquidation.
+>
+> The practical consequence, worst case where every basket freezes:
+>
+> | `GRID_MAX_DAILY_LOSS_USD` | baskets the day can hold |
+> | --- | --- |
+> | 40 | 1 |
+> | 100 | 2 |
+> | 150 | 3 |
+> | 200 | 5 |
+>
+> That is a floor on the day, not a plan for it. Most baskets do not freeze —
+> but the ones that do cost this much, and the budget has to be able to pay.
 
 ### Forward evaluation plan — fixed before any results arrive
 

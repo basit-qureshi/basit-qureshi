@@ -183,7 +183,10 @@ def test_slow_reporting_does_not_delay_available_protective_work(broker, engine_
 
     broker.price -= 30.0                      # through the stop
     e._protective_tick()
-    assert e._close_intent is not None, "the stop did not fire without reporting"
+    # A confirmed close now retires its intent, so the evidence that the stop
+    # fired is the counted basket and the latch it left behind.
+    assert e._baskets_stopped == 1, "the stop did not fire without reporting"
+    assert e._entries_paused, "a loss exit must latch entries"
     assert broker.get_open_positions("XAUUSD", magic=MAGIC) == []
 
 

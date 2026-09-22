@@ -75,8 +75,11 @@ def test_the_exit_reserve_is_reported_apart_from_the_historical_result():
 def test_floating_loss_alone_can_reach_the_daily_limit(broker, engine_factory):
     """The defect this replaces: a realised-only reading let a basket sit at a
     large floating loss without moving the daily number at all."""
+    # $40, not $15: a daily limit smaller than the ~$37.80 a completed grid
+    # freezes at is now refused at admission, so a grid would never be placed
+    # and there would be no floating loss to measure.
     e = engine_factory(basket_take_profit_usd=10_000.0, basket_stop_loss_usd=60.0,
-                       max_daily_loss_usd=15.0)
+                       max_daily_loss_usd=40.0)
     e._tick()
     broker.next_candle()
     e._tick()
@@ -90,10 +93,10 @@ def test_floating_loss_alone_can_reach_the_daily_limit(broker, engine_factory):
     assert e._halt_reason is None
 
     # Nothing has settled. The whole loss is floating, and it lands between the
-    # $15 daily limit and the $60 basket stop so the daily limit is what fires.
+    # $40 daily limit and the $60 basket stop so the daily limit is what fires.
     # The fills sit between 4000.30 and 4003.00, so the price has to drop below
     # all of them for the loss to be directional rather than a few cents.
-    broker.price -= 6.0          # ~-$36 marked: past the $15 limit, inside the $60 stop
+    broker.price -= 7.0          # ~-$46 marked: past the $40 limit, inside the $60 stop
     broker.next_candle()
     e._tick()
     assert e._halt_reason is not None and "daily loss" in e._halt_reason

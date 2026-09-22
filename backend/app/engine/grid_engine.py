@@ -835,6 +835,13 @@ class GridEngine:
         self._basket_id = None
         logger.info("close intent complete (%s) after %d attempt(s)", intent.cause, intent.attempts)
         self._persist_risk_state()
+        # Retired here, not only by the caller that happens to remember. Only
+        # the profit path used to retire, so after a stop or a risk halt a
+        # DONE intent stayed attached for good — and `_check_risk_limits`
+        # re-opens a close for live exposure only when NO intent is attached.
+        # A halted engine therefore ignored exposure that appeared after its
+        # own close confirmed, which is the one state it must never ignore.
+        self._retire_finished_intent(intent)
         return False
 
     def _retire_finished_intent(self, intent: CloseIntent) -> None:
@@ -1321,7 +1328,7 @@ class GridEngine:
                 + ". Existing exposure is still protected."
             )
 
-        affordable, reason = self._affordability(account)
+        affordable, reason = self._affordability(account, risk)
         if not affordable:
             return False, reason
         return True, None
@@ -1360,7 +1367,7 @@ class GridEngine:
         spread_cost = spread_points * self.lot_size * per_point * (len(buys) + len(sells))
         return round(frozen + spread_cost, 2)
 
-    def _affordability(self, account) -> tuple[bool, str | None]:
+    def _affordability(self, account, risk=None) -> tuple[bool, str | None]:
         try:
             info = self.broker.get_symbol_info(self.symbol)
             price = self.broker.get_current_price(self.symbol)
@@ -1402,6 +1409,39 @@ class GridEngine:
                 f"both sides fill, which is more than the ${budget:.2f} budget. Reduce the levels, the "
                 f"lot size or the spacing, or raise the budget — the grid as configured cannot finish "
                 f"building without breaching it."
+            )
+
+        # 2b. The same argument, against what is LEFT of today's loss budget
+        #     and against the capital floor. Check 2 asks whether the grid can
+        #     finish building inside the basket budget; these ask whether it
+        #     can finish building inside the two other limits the owner already
+        #     set. No number here is invented: `frozen` is this engine's own
+        #     calculation and the budgets are the owner's own settings.
+        #
+        #     Why it matters: a basket that cannot finish inside the remaining
+        #     daily allowance has only one way to end — the daily limit firing
+        #     and liquidating it. The limit does bound the loss, so this is not
+        #     an uncontrolled drawdown; it is a basket opened in the knowledge
+        #     that a forced liquidation is its only outcome, plus the exit cost
+        #     and whatever the mark moves between two protective cycles.
+        if self.max_daily_loss_usd > 0:
+            day = risk if risk is not None else self._day_risk()
+            remaining = round(self.max_daily_loss_usd + day.marked_result, 2)
+            if frozen > remaining:
+                return False, (
+                    f"NO_TRADE: a fully filled grid locks in about ${frozen:.2f}, but only "
+                    f"${remaining:.2f} of today's ${self.max_daily_loss_usd:.2f} loss budget is left "
+                    f"(marked {day.marked_result:.2f}). The basket could only end by forcing the daily "
+                    f"limit to liquidate it. No new grid today unless the budget or the grid changes."
+                )
+
+        floor_headroom = round(balance - self.capital_floor_usd, 2)
+        if frozen > floor_headroom:
+            return False, (
+                f"NO_TRADE: a fully filled grid locks in about ${frozen:.2f}, which would take the "
+                f"${balance:.2f} balance to or past the ${self.capital_floor_usd:.2f} capital floor "
+                f"(${floor_headroom:.2f} of headroom). The floor is the line this account is not traded "
+                f"down past, so the grid is not placed."
             )
 
         # 3. The broker's own volume rules.

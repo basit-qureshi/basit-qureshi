@@ -53,12 +53,12 @@ def run() -> int:
 
 def _run(workspace: str) -> int:
     broker = FakeBroker()
-    # Fixture values, NOT a recommendation. The basket stop has to exceed the
-    # ~$37.80 a completed 10+10 grid locks in, or admission refuses to place
-    # one at all — which is itself the behaviour Phase A put there.
+    # Fixture values, NOT a recommendation. Both the basket stop AND the daily
+    # loss limit have to exceed the ~$37.80 a completed 10+10 grid locks in, or
+    # admission refuses to place one at all — which is itself the protection.
     engine = GridEngine(broker=broker, symbol="XAUUSD", mode="demo", magic_number=MAGIC,
                         capital_floor_usd=50.0, basket_stop_loss_usd=60.0,
-                        max_daily_loss_usd=15.0, basket_take_profit_usd=10_000.0)
+                        max_daily_loss_usd=40.0, basket_take_profit_usd=10_000.0)
 
     manifest = ev.build_manifest(
         profile_key="baseline@v1",
@@ -91,7 +91,7 @@ def _run(workspace: str) -> int:
     # Price turns back through the filled side until the day's limit is reached.
     for order in list(broker.get_pending_orders("XAUUSD", magic=MAGIC)):
         broker.cancel_pending_order(order.ticket)
-    broker.price -= 6.0
+    broker.price -= 7.0
     engine._protective_tick()
     engine._reporting_tick()
 

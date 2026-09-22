@@ -1,15 +1,18 @@
-# Demo validation status — Phase F
+# Demo validation status — Phase F, amended by the A–F audit
 
 Branch `claude/forex-ai-trading-bot-izgn6l`. Source revision: `6771366`
-(Phase F), on top of `e9f1e21` (Phase E). **Nothing has been pushed;
-`origin` is still at `1116af1`.** No terminal was connected, no order was
-placed, no session was recorded on a real account.
+(Phase F) plus the audit commit below, on top of `e9f1e21` (Phase E).
+**Nothing has been pushed; `origin` is still at `1116af1`.** No terminal was
+connected, no order was placed, no session was recorded on a real account.
+
+§7 holds the A–F audit: what it re-checked against the code rather than
+against the phase reports, and the two protection defects it found.
 
 ## The four questions, answered separately
 
 | Question | Answer |
 | --- | --- |
-| Do the **offline checks** pass? | **Yes.** 336 backend tests, 4 frontend tests, lint clean, build clean, and a fixture dry-run that records a full session and exports it. |
+| Do the **offline checks** pass? | **Yes.** 341 backend tests, 4 frontend tests, lint clean, build clean, and a fixture dry-run that records a full session and exports it. |
 | Is a **demo session ready to run**? | **Prepared, not authorized to start.** The collector, the export and the procedure exist. It is blocked on three owner risk numbers (`OWNER_RUNBOOK.md` §E). |
 | Has an **actual session occurred**? | **No.** Zero sessions recorded. Zero demo trades. Zero live trades. |
 | Is **profitability supported**? | **No. Trading performance is not measured.** There is no market data and no session data, so there is nothing to measure it from. |
@@ -78,7 +81,7 @@ Linux container, Python 3.11. No MT5, no Windows, no terminal, no network
 provider, no credentials read.
 
 ```
-cd backend  && python3 -m pytest -q                        -> 336 passed
+cd backend  && python3 -m pytest -q                        -> 341 passed
 cd backend  && python3 -m compileall -q app tools          -> OK
 cd backend  && python3 -m tests.bench.collector_dryrun     -> rc 0
 cd frontend && npm test                                    -> 4 passed
@@ -104,7 +107,7 @@ collector works. They establish nothing about gold, this strategy, or money.
 
 | Class | Present |
 | --- | --- |
-| Synthetic contract tests | **yes** — 336 backend, 4 frontend |
+| Synthetic contract tests | **yes** — 341 backend, 4 frontend |
 | Fixture collector dry-run | **yes** — one, reproducible |
 | Historical replay on real ticks | **no** — no dataset exists |
 | Recorded demo session | **no** — none has been run |
@@ -174,3 +177,65 @@ works; the ticks tell you whether the strategy is worth running it for.
 After a session exists, add the **redacted packet** from
 `tools\export_session.py`. Never the `evidence\` folder itself — that one is
 unredacted by design.
+
+---
+
+## 7. Phase A–F audit — verified against the code, not the reports
+
+Each phase was re-checked by reading the implementation and running probes
+against the fake broker, on the assumption that a phase report proves nothing
+about the code. Two defects survived into this pass; both are fixed below.
+
+### 7.1 Status by phase
+
+| Phase | Claim | Audit finding |
+| --- | --- | --- |
+| A — capital protection | marked daily risk, durable closure, real admission | **Implemented, and two holes found this pass** (7.2). The marked identity, the anchor's survival across restarts and the three owner invariants hold: `app/engine/risk_accounting.py`, `tests/test_phase_a_acceptance.py` |
+| B — execution | reporting off the protective path | **Implemented and measured.** Re-run this pass: full tick median **84.3 ms**, protective-only **25.9 ms**, a 69% reduction on the synthetic bench. `tests/bench/bench_execution.py` |
+| C — strategy | evidence-based selection | **Blocked by data, not implemented-and-failing.** The harness runs and refuses to select: `SELECTION RESULT: INSUFFICIENT EVIDENCE — BLOCKED BY DATA`. `tests/bench/run_phase_c.py` |
+| D — AI / news | auditable pipeline, shadow only | **Implemented, unwired by design.** No model exists, and the engine contains no call site that consults one — `test_ai_shadow_cannot_mutate_orders_or_configuration` greps the engine source to keep it that way |
+| E — validation | integration verification | **Holds.** Both Phase E fixes are still in place: the halt check in `_entry_gate:1275`, the retired poll knob in `status()` |
+| F — evidence | session record and redacted export | **Implemented and verified against fixtures.** Still zero recorded sessions |
+
+### 7.2 Defects found by the audit and fixed
+
+| # | Defect | Evidence | Fix |
+| --- | --- | --- | --- |
+| 1 | **A grid was admitted that could not fit inside the owner's remaining daily budget or the capital floor.** Admission already refused a grid whose completed-grid freeze exceeded the *basket* budget; the same sentence was true of the other two limits and nothing checked them. Probe: with $15 of a $100 daily budget left, a grid that freezes at **$37.80** was admitted. Its only possible ending was the daily limit liquidating it — and a fast oscillation filling both sides between two protective cycles lands there before any tick can fire, so the limit could be overshot by 2.5× | `_affordability`, `app/engine/grid_engine.py:1407` | Refuse when the known freeze exceeds the remaining daily allowance, or the balance-minus-floor headroom. Both numbers are the owner's own settings; nothing is invented. `test_a_grid_that_cannot_fit_the_remaining_daily_budget_is_refused`, `test_a_grid_that_would_break_the_capital_floor_is_refused`, plus `test_the_same_grid_is_allowed_while_the_budget_can_absorb_it` so the guard cannot simply block everything |
+| 2 | **A halted engine ignored exposure that appeared after its own close confirmed.** Only the profit path retired a finished close intent, so after a stop or a risk halt a DONE intent stayed attached for good — and `_check_risk_limits` re-opens a close for live exposure **only when no intent is attached**. Probe: halted, one position open at the broker with the bot's own magic number, one protective tick, **position still open** | `_drive_close_intent`, `app/engine/grid_engine.py:838` | The intent is retired where it completes, so every cause behaves like the profit path. `test_a_completed_close_releases_its_intent`, `test_a_halted_engine_still_closes_exposure_that_appears_afterwards` |
+
+### 7.3 What fix 1 changes for the owner
+
+The three risk numbers are now all measured against the **≈ $37.80** a
+completed 10+10 grid at 0.01 lots / 0.30 spacing locks in. A daily loss limit
+smaller than that is a configuration the machine cannot honour, and admission
+now says so instead of placing a basket and liquidating it. `OWNER_RUNBOOK.md`
+§E carries the table: a $100 daily limit holds **2** frozen baskets, $150 holds
+3, $200 holds 5.
+
+Six existing tests used deliberately tiny daily limits ($5, $15) to make the
+limit fire quickly. Those configurations are now refused before a grid exists,
+so each was re-pointed at a limit the configuration can honour ($40) while
+testing exactly what it tested before. One Phase B assertion changed from "an
+intent is still attached" to "the basket was counted and entries latched",
+because a confirmed close now releases its intent.
+
+### 7.4 Not changed, and why
+
+- **Accounting** — the marked identity, settlement idempotence, the
+  close-reason rule and the day-roll anchor were re-read and probed; no defect
+  found. The Phase F settlement hook links corrections rather than overwriting.
+- **Execution delay** — the separation holds and the bench reproduces it. No
+  further work is useful without real fill times from Windows.
+- **Strategy evaluation** — blocked by missing ticks. Building more strategy
+  machinery before there is data to judge it would be the opposite of what the
+  objective asks for.
+- **AI** — nothing to integrate. There is no trained model, and wiring an
+  untrained one into admission would be the single worst change available.
+
+### 7.5 Profitability after this pass
+
+**Still not measured.** These fixes make the loss limits enforceable; they do
+not make the strategy profitable, and nothing in this repository yet supports a
+claim either way. The freeze at ≈ −$37.80 against a +$10 target remains the
+open question, and it is a question about real tick history, not about code.

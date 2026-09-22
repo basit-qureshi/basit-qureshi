@@ -108,7 +108,8 @@ def test_max_open_positions_pulls_the_rest_of_the_grid(broker, engine_factory):
 
 
 def test_risk_halt_flattens_and_stands_down(broker, engine_factory):
-    e = engine_factory(basket_take_profit_usd=1000.0, basket_stop_loss_usd=60.0, max_daily_loss_usd=5.0)
+    # 40.00: below the completed-grid freeze (~$37.80) admission refuses the grid.
+    e = engine_factory(basket_take_profit_usd=1000.0, basket_stop_loss_usd=60.0, max_daily_loss_usd=40.0)
     armed(broker, e)
     broker.price = 4004.0
     broker.next_candle()

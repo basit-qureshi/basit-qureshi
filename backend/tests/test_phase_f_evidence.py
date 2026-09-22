@@ -289,7 +289,9 @@ def test_a_refused_admission_records_its_reason(broker, engine_factory):
 
 
 def test_a_loss_exit_records_the_limit_the_halt_and_the_confirmation(broker, engine_factory):
-    e = engine_factory(**live(max_daily_loss_usd=15.0))
+    # $40: a daily limit under the ~$37.80 completed-grid freeze is refused at
+    # admission, so no grid would be placed and no limit could fire.
+    e = engine_factory(**live(max_daily_loss_usd=40.0))
     e.evidence = ev.SessionEvidence(manifest())
     e._tick()
     broker.next_candle()
@@ -299,7 +301,7 @@ def test_a_loss_exit_records_the_limit_the_halt_and_the_confirmation(broker, eng
     e._tick()
     for o in list(orders(broker)):
         broker.cancel_pending_order(o.ticket)
-    broker.price -= 6.0
+    broker.price -= 7.0
     e._protective_tick()
 
     kinds = [x["kind"] for x in e.evidence.events]
