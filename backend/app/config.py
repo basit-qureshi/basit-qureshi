@@ -100,5 +100,10 @@ class Settings(BaseSettings):
 
     database_url: str = "sqlite:///./trading_bot.db"
 
+    # Where a recorded session writes its manifest and event log. Relative to
+    # the backend working directory. Nothing is written here unless a session
+    # is explicitly started.
+    evidence_dir: str = "evidence"
+
 
 settings = Settings()

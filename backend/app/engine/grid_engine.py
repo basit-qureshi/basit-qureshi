@@ -57,6 +57,7 @@ from app.engine.instrumentation import (
     new_correlation_id,
 )
 from app.engine.risk_accounting import build_day_risk
+from app.evidence import session as evidence_session
 
 logger = logging.getLogger("grid_engine")
 
@@ -194,6 +195,19 @@ class GridEngine:
         # arrives after a newer one.
         self._snapshot_seq = 0
         self._broadcast_failures = 0
+        # Evidence capture is OPTIONAL and best-effort. NullEvidence makes
+        # every call a no-op so the protective path needs no branch, and a
+        # real recorder can never raise into it.
+        self.evidence = evidence_session.NullEvidence()
+        self._last_quote_evidence_ms = -1e12
+        self._last_quote_evidence_count = -1
+        self._last_heartbeat_ms = -1e12
+        self._last_heartbeat_shape: tuple | None = None
+        self._link_up: bool | None = None
+        self._broker_trade_mode = "unchecked"
+        # ticket -> the settlement event it was first recorded in, so a later
+        # revision links a correction instead of rewriting the original.
+        self._settlement_events: dict[str, tuple[str, float | None]] = {}
         # Set once the broker's own account classification has been checked
         # against the configured mode. Invalidated on any identity change.
         self._account_verified: str | None = None
@@ -478,6 +492,7 @@ class GridEngine:
         exit_cost = self._estimated_exit_cost(positions)
         basket_profit = round(basket_net - (exit_cost or 0.0), 2)
         hedged = self._is_hedged(positions)
+        self._record_heartbeat(account, positions, pendings, basket_profit, costs_known)
 
         if self._close_intent and not self._close_intent.finished:
             self._broadcast(account, positions, pendings, basket_profit,
@@ -488,6 +503,63 @@ class GridEngine:
             return
 
         self._consider_entry(account, positions, pendings, candle, basket_profit, hedged)
+
+    #: Seconds between exposure heartbeats. Frequent enough that a reviewer can
+    #: see what was open through a session, sparse enough not to bury decisions.
+    HEARTBEAT_INTERVAL_S = 60.0
+
+    def _record_heartbeat(self, account, positions, pendings, basket_profit, costs_known) -> None:
+        """Remaining exposure, the day's marked risk, and measured cycle time.
+
+        Answers the three questions a reviewer asks of a finished session that
+        the decision events alone cannot: what was actually open at the time,
+        what the day's risk reading was when it was open, and whether the
+        protective loop was keeping up. The timing figures are measured spans
+        from the monotonic clock, never a difference between two clocks.
+
+        This is the state at the START of a reporting cycle. A grid placed
+        later in the same cycle appears in its own GRID_PLACED event, with its
+        own timestamp, and in the following heartbeat.
+        """
+        if getattr(self.evidence, "manifest", None) is None:
+            return
+        connected = True
+        try:
+            connected = bool(self.broker.is_connected())
+        except Exception:
+            connected = False
+        if self._link_up is not None and connected != self._link_up:
+            if connected:
+                self._record_evidence(evidence_session.RECONNECT, link="up")
+            else:
+                self._note_evidence_gap("broker link reported down")
+        self._link_up = connected
+
+        now = monotonic_ms()
+        shape = (len(positions), len(pendings), bool(self._halt_reason), bool(self._pause_reason))
+        due = now - self._last_heartbeat_ms >= self.HEARTBEAT_INTERVAL_S * 1000
+        if not due and shape == self._last_heartbeat_shape:
+            return
+        # A change in what is open is recorded when it happens, not up to a
+        # minute later: "nothing was open" for a period when something was is
+        # the one thing this record must never say.
+        self._last_heartbeat_ms = now
+        self._last_heartbeat_shape = shape
+        try:
+            risk = self._day_risk(positions).as_dict()
+        except Exception:
+            risk = None
+        self._record_evidence(
+            evidence_session.EXPOSURE_SNAPSHOT,
+            basket_id=self._basket_id,
+            positions_open=len(positions), orders_resting=len(pendings),
+            basket_profit=basket_profit, costs_known=costs_known,
+            equity=getattr(account, "equity", None),
+            balance=getattr(account, "balance", None),
+            day_risk=risk, halted=self._halt_reason, paused=self._pause_reason,
+            link_up=connected,
+            protective_cycle_ms=self._timing.stats("protective_tick").as_dict(),
+        )
 
     def _consider_entry(self, account, positions, pendings, candle, basket_profit, hedged) -> None:
         """The entry path, unchanged in policy and moved off the fast loop."""
@@ -524,10 +596,19 @@ class GridEngine:
             return
         allowed, block = self._entry_gate(account)
         self._entry_block = None if allowed else block
+        self._record_evidence(evidence_session.ADMISSION_DECIDED, allowed=allowed,
+                             reason=block or "all gates passed",
+                             unknowns=list(self._entry_unknowns))
         if not allowed:
             self._broadcast(account, positions, pendings, basket_profit, note=block, hedged=hedged)
             return
         self._build_grid()
+        self._record_evidence(evidence_session.GRID_PLACED, basket_id=self._basket_id,
+                             reference_price=self._reference_price,
+                             orders_resting=len(self._current_pendings()),
+                             lot=self.lot_size, spacing=self.grid_distance,
+                             buy_levels=self.buy_stop_levels,
+                             sell_levels=self.sell_stop_levels)
         self._profit_restart_pending = False
         pendings = self._current_pendings()
         self._had_grid = bool(pendings)
@@ -566,6 +647,30 @@ class GridEngine:
             price=price, broker_time=None, missing=price is None,
         )
         self._last_symbol_info = info
+        self._record_quote_evidence(price, info, positions)
+
+    #: Seconds between recorded quotes while nothing is changing. One quote per
+    #: protective tick would be ~86k events a day and would push the decisions
+    #: worth reading out of a bounded buffer. A change in how many positions are
+    #: open, or a missing quote, is recorded immediately regardless.
+    QUOTE_EVIDENCE_INTERVAL_S = 15.0
+
+    def _record_quote_evidence(self, price, info, positions) -> None:
+        if getattr(self.evidence, "manifest", None) is None:
+            return                      # no session recording; nothing to throttle
+        now = monotonic_ms()
+        changed = len(positions) != self._last_quote_evidence_count
+        due = (now - self._last_quote_evidence_ms) >= self.QUOTE_EVIDENCE_INTERVAL_S * 1000
+        if not (changed or due or price is None):
+            return
+        self._last_quote_evidence_ms = now
+        self._last_quote_evidence_count = len(positions)
+        self._record_evidence(evidence_session.QUOTE_OBSERVED, price=price,
+                              spread=getattr(info, "spread", None),
+                              missing=price is None,
+                              costs_known=all(getattr(p, "costs_known", True) for p in positions),
+                              positions_open=len(positions),
+                              sampled_every_seconds=self.QUOTE_EVIDENCE_INTERVAL_S)
 
     def _tick(self) -> None:
         """One combined cycle: protection, then reporting.
@@ -621,6 +726,24 @@ class GridEngine:
 
     # ------------------------------------------------- close lifecycle
 
+    def _record_evidence(self, kind: str, **payload) -> None:
+        """Records one event, and cannot fail the caller.
+
+        The real recorder already swallows its own errors, but the engine does
+        not get to depend on that: evidence capture is optional and a swapped-in
+        recorder must never be able to break a protective cycle.
+        """
+        try:
+            self.evidence.record(kind, **payload)
+        except Exception:
+            logger.exception("evidence capture failed (continuing)")
+
+    def _note_evidence_gap(self, reason: str, **payload) -> None:
+        try:
+            self.evidence.note_gap(reason, **payload)
+        except Exception:
+            logger.exception("evidence gap capture failed (continuing)")
+
     def _new_basket_id(self) -> str:
         self._basket_seq += 1
         return f"{self._account_id}:{self.symbol}:{self.magic_number}:{self._basket_seq}"
@@ -637,6 +760,9 @@ class GridEngine:
         self._basket_id = self._basket_id or self._new_basket_id()
         self._close_intent = CloseIntent(cause=cause, reason=reason, basket_id=self._basket_id)
         self._persist_risk_state()
+        self._record_evidence(evidence_session.CLOSE_INTENT_OPENED,
+                             basket_id=self._basket_id, cause=cause, reason=reason,
+                             latches_entries=self._close_intent.latches_entries)
         logger.warning("close intent opened (%s): %s", cause, reason)
         return self._close_intent
 
@@ -671,6 +797,8 @@ class GridEngine:
             intent.state = STATE_RECONCILING
             intent.last_error = "broker state could not be read — exposure not confirmed gone"
             self._persist_risk_state()
+            self._note_evidence_gap("broker state unreadable during an open close intent",
+                                   basket_id=intent.basket_id, confirmed_flat=False)
             return True
 
         if positions or pendings:
@@ -679,10 +807,19 @@ class GridEngine:
                 f"{len(positions)} position(s) and {len(pendings)} order(s) survived the close"
             )
             self._persist_risk_state()
+            self._record_evidence(evidence_session.CLOSE_INTENT_PROGRESS,
+                                 basket_id=intent.basket_id, state=intent.state,
+                                 attempts=intent.attempts,
+                                 positions_remaining=len(positions),
+                                 orders_remaining=len(pendings),
+                                 confirmed_flat=False, last_error=intent.last_error)
             return True
 
         intent.state = STATE_DONE
         intent.last_error = None
+        self._record_evidence(evidence_session.CLOSE_INTENT_DONE,
+                             basket_id=intent.basket_id, cause=intent.cause,
+                             attempts=intent.attempts, confirmed_flat=True)
         if not intent.counted:
             # Counted once for the basket, not once per retry.
             intent.counted = True
@@ -753,6 +890,8 @@ class GridEngine:
             # the result is re-read rather than assumed.
             self._record_new_fills(self._safe_positions() or [])
         self._persist_risk_state()
+        self._record_evidence(evidence_session.PAUSE, reason=reason,
+                              orders_cancelled=cancelled)
         return True, f"Entries paused. {cancelled} resting order(s) cancelled; open positions are still managed."
 
     def resume_entries(self) -> tuple[bool, str]:
@@ -767,6 +906,7 @@ class GridEngine:
         self._pause_reason = None
         self._close_intent = None
         self._persist_risk_state()
+        self._record_evidence(evidence_session.RESUME, by="owner")
         return True, "Entries resumed. All current risk checks still apply before any grid is placed."
 
     def close_and_pause(self, reason: str = "closed by owner") -> tuple[bool, str]:
@@ -795,7 +935,14 @@ class GridEngine:
                 self.broker.cancel_pending_order(order.ticket)
             except Exception:
                 logger.exception("Pending cancellation will be retried")
-        positions = self.broker.get_open_positions(self.symbol, magic=self.magic_number)
+        # Guarded: an unreadable broker here must leave the intent outstanding,
+        # not raise out of the close path. None means "could not confirm", and
+        # the caller keeps the intent open on that basis.
+        positions = self._safe_positions()
+        if positions is None:
+            self._note_evidence_gap("broker unreadable while closing — exposure not confirmed gone")
+            self._last_error = "broker unreadable during a close — exposure not confirmed gone"
+            return
         self._record_new_fills(positions)
         pendings = self._current_pendings()
         for p in positions:
@@ -812,8 +959,12 @@ class GridEngine:
         self._day_realized += realized
         self._settle_closed_trades(reason)
 
-        leftover_positions = self.broker.get_open_positions(self.symbol, magic=self.magic_number)
-        leftover_orders = self.broker.get_pending_orders(self.symbol, magic=self.magic_number)
+        leftover_positions = self._safe_positions()
+        leftover_orders = self._safe_pendings()
+        if leftover_positions is None or leftover_orders is None:
+            self._note_evidence_gap("broker unreadable while verifying a close")
+            self._last_error = "broker unreadable during a close — exposure not confirmed gone"
+            return
         if leftover_positions or leftover_orders:
             self._record_new_fills(leftover_positions)
             # Retry once: a stop can fill in the moment between closing and
@@ -830,7 +981,11 @@ class GridEngine:
                     logger.exception("failed to cancel leftover order %s", o.ticket)
             self._settle_closed_trades(reason)
 
-        still_there = self.broker.get_open_positions(self.symbol, magic=self.magic_number)
+        still_there = self._safe_positions()
+        if still_there is None:
+            self._note_evidence_gap("broker unreadable after a close attempt")
+            self._last_error = "broker unreadable after a close — exposure not confirmed gone"
+            return
         if still_there:
             self._last_error = f"{len(still_there)} position(s) could not be closed — not starting a new grid"
             logger.error(self._last_error)
@@ -988,6 +1143,10 @@ class GridEngine:
         """
         identity = getattr(account, "account_id", None)
         trade_mode = getattr(account, "trade_mode", "unknown")
+        # Kept so the dashboard and the pre-flight check can show what the
+        # BROKER said, next to what the app is set to. They are different
+        # facts and the owner has to be able to compare them.
+        self._broker_trade_mode = trade_mode
 
         if not identity:
             return Admission.refuse("NO_TRADE: the broker did not report an account identity.", "account_id")
@@ -1660,6 +1819,9 @@ class GridEngine:
             self._halt_reason = reason
             # Written down BEFORE the liquidation is attempted. If the process
             # dies mid-close, the next run still knows it was halted.
+            self._record_evidence(evidence_session.LIMIT_EVENT, cause=cause, reason=reason,
+                                 day_risk=risk.as_dict())
+            self._record_evidence(evidence_session.HALT, reason=reason, cause=cause)
             self._open_close_intent(cause, f"risk protection: {reason}")
             logger.warning("risk protection activated: %s — flattening and standing down", reason)
         elif self._close_intent is None and (positions or pendings):
@@ -1763,9 +1925,40 @@ class GridEngine:
                     settled_at = self.broker.get_settlement_time(ticket) if hasattr(self.broker, "get_settlement_time") else None
                     record.close_time = settled_at or record.close_time
                     record.trading_day = self._trading_day_for(settled_at) if settled_at else self._trading_day
+                    self._record_settlement(ticket, profit, reason or record.close_reason)
                 self._known_tickets.discard(ticket)
             session.commit()
         self._refresh_daily_totals()
+
+    def _record_settlement(self, ticket: str, profit: float | None, reason: str | None) -> None:
+        """One settlement event per ticket, and a linked CORRECTION if it moves.
+
+        The broker's realised figure is not always final at the moment a
+        position leaves the open list - a swap or commission line can land
+        after it. Rewriting the first event would destroy the only record of
+        what was known when the decision was made, so a revision is appended
+        and points at the row it revises.
+        """
+        try:
+            prior = self._settlement_events.get(ticket)
+            if prior is None:
+                event = self.evidence.record(
+                    evidence_session.SETTLEMENT, ticket=ticket, profit=profit,
+                    profit_known=profit is not None, reason=reason,
+                    basket_id=self._basket_id, trading_day=self._trading_day)
+                if event is not None:
+                    if len(self._settlement_events) >= 2000:
+                        self._settlement_events.pop(next(iter(self._settlement_events)))
+                    self._settlement_events[ticket] = (event["event_id"], profit)
+                return
+            event_id, recorded = prior
+            if profit is not None and profit != recorded:
+                self.evidence.correct(
+                    event_id, reason="the broker revised the realised figure after settlement",
+                    ticket=ticket, previous_profit=recorded, profit=profit)
+                self._settlement_events[ticket] = (event_id, profit)
+        except Exception:
+            logger.exception("settlement evidence failed (continuing)")
 
     def _sync_broker_history(self):
         if not hasattr(self.broker, "history_records") or (self._history_ready and time.monotonic() - self._last_history_sync < getattr(self.broker, "history_sync_interval", 30)):
@@ -1785,6 +1978,11 @@ class GridEngine:
                         setattr(record, name, value)
                 record.status = "CLOSED"
                 record.trading_day = self._trading_day_for(item["close_time"])
+                # The history sweep is where a revised realised figure usually
+                # arrives. Routed through the same place so it links a
+                # correction rather than quietly replacing what was recorded.
+                self._record_settlement(item["ticket"], item.get("profit"),
+                                        record.close_reason)
             session.commit()
         if hasattr(self.broker, "acknowledge_history"):
             self.broker.acknowledge_history()
@@ -1918,6 +2116,9 @@ class GridEngine:
             "close_intent": self._close_intent.as_dict() if self._close_intent else None,
             "persistence_error": self._persist_failed,
             "account_verified": self._account_verified,
+            # What the broker itself classified the account as, or "unchecked"
+            # before anything asked it. Never copied from the app's own mode.
+            "broker_trade_mode": self._broker_trade_mode,
             "trading_window": self.session_label(),
             "in_session": self._within_session(),
             "capital_reserve_percent": self.capital_reserve_percent,

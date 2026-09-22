@@ -8,6 +8,7 @@ from app.api.schemas import BacktestRequest, ModeUpdate, SettingsUpdate, StartRe
 from app.backtest.backtester import run_grid_backtest
 from app.bot_manager import bot_manager
 from app.brokers.base import OrderSide, PendingType
+from app.config import settings
 from app import db as db_module
 from app.db import TradeRecord
 from app.strategy import profiles as strategy_profiles
@@ -492,6 +493,91 @@ def get_candles(count: int = 200):
     }
 
 
+def current_ai_mode() -> str:
+    """The mode the engine is ACTUALLY running, from one place.
+
+    It is disabled because the engine contains no call site that consults a
+    model - not because a default says so. `/api/ai-status` and the session
+    manifest both read this, so the day a mode becomes selectable there is one
+    line to change and the manifest cannot drift away from the truth.
+    """
+    from app.ai.contracts import AIMode
+    return AIMode.DISABLED.value
+
+
+@router.post("/session/start")
+def start_evidence_session(replace: bool = False):
+    """Begins recording a demo evidence session. Starts no trading.
+
+    The profile is frozen for the session and the AI mode is recorded as it
+    actually is. Account type stays UNVERIFIED unless the broker itself has
+    been asked and agreed - the app's demo/real setting is not an observation.
+
+    A second start refuses rather than replacing a live recorder: quietly
+    swapping one out mid-session splits the evidence for one run across two
+    files and leaves neither reconcilable. Pass `replace=true` to mean it.
+    """
+    from app.evidence import session as ev
+    from app.strategy import profiles as sp
+
+    engine = bot_manager.engine
+    running = getattr(engine.evidence, "manifest", None)
+    if running is not None and not replace:
+        return {"ok": False,
+                "reason": f"session {running.session_id} is already recording; "
+                          "stop it first, or pass replace=true",
+                "session": running.as_dict()}
+
+    account, verified = None, False
+    if engine.broker.is_connected():
+        try:
+            account = engine.broker.get_account_info()
+            verified = engine.verify_account(account).allowed
+        except Exception as exc:
+            logger.warning("account could not be read for the manifest: %s", exc)
+
+    manifest = ev.build_manifest(
+        profile_key=sp.BASELINE.key,
+        strategy_config={k: v for k, v in bot_manager.settings.items()
+                         if k.startswith("grid_") or k in ("symbol", "timeframe", "mode")},
+        symbol=engine.symbol,
+        accounting_timezone=engine.timezone_name,
+        ai_mode=current_ai_mode(),
+        account_info=account, account_verified=verified,
+    )
+    engine.evidence = ev.SessionEvidence(manifest, directory=settings.evidence_dir)
+    return {"ok": True, "session": manifest.as_dict(),
+            "directory": settings.evidence_dir}
+
+
+@router.post("/session/stop")
+def stop_evidence_session():
+    """Stops recording. Does not stop the bot and does not close anything."""
+    from app.evidence import session as ev
+
+    engine = bot_manager.engine
+    coverage = engine.evidence.coverage()
+    engine.evidence = ev.NullEvidence()
+    return {"ok": True, "coverage": coverage}
+
+
+@router.get("/session/status")
+def evidence_session_status():
+    engine = bot_manager.engine
+    manifest = getattr(engine.evidence, "manifest", None)
+    return {
+        "active": manifest is not None,
+        "manifest": manifest.as_dict() if manifest else None,
+        "coverage": engine.evidence.coverage(),
+    }
+
+
+@router.get("/session/packet")
+def evidence_packet():
+    """The REDACTED packet, safe to share for review."""
+    return bot_manager.engine.evidence.shareable()
+
+
 @router.get("/ai-status")
 def get_ai_status():
     """What the AI layer is doing, which is nothing by default.
@@ -508,7 +594,7 @@ def get_ai_status():
 
     extractor = NullExtractor()
     return {
-        "mode": AIMode.DISABLED.value,
+        "mode": current_ai_mode(),
         "available_modes": [AIMode.DISABLED.value, AIMode.SHADOW.value],
         "gating_selectable": False,
         "model_loaded": False,

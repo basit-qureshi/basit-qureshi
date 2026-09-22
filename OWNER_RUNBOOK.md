@@ -2,14 +2,14 @@
 
 Repository root on your machine: `C:\Users\Home\Documents\basit-qureshi`
 
-**State of the work:** four commits exist **only on your machine's clone after
-you pull — they are currently LOCAL in the development environment and have
-NOT been pushed.** `origin/claude/forex-ai-trading-bot-izgn6l` is still at
-`1116af1`. A `git pull` will therefore bring you **nothing new** until the
-commits are pushed. Say the word and they go up.
+**State of the work:** these commits exist **only in the development
+environment — they are LOCAL and have NOT been pushed.**
+`origin/claude/forex-ai-trading-bot-izgn6l` is still at `1116af1`. A `git pull`
+will therefore bring you **nothing new** until they are pushed. Say the word
+and they go up.
 
 Commits waiting: `b1ba98c` (Phase A) · `83b81f5` (Phase B) · `be9f84e`
-(Phase C) · `e529600` (Phase D) · plus Phase E fixes.
+(Phase C) · `e529600` (Phase D) · `e9f1e21` (Phase E) · plus Phase F.
 
 ---
 
@@ -50,7 +50,7 @@ cd C:\Users\Home\Documents\basit-qureshi\backend
 .\venv\Scripts\python.exe -m pip install -r requirements.txt -r requirements-mt5.txt
 .\venv\Scripts\python.exe -m pytest -q
 ```
-Expect **283 passed**. Anything else, stop and send the output.
+Expect **336 passed**. Anything else, stop and send the output.
 
 ```powershell
 cd C:\Users\Home\Documents\basit-qureshi\frontend
@@ -67,7 +67,14 @@ cd C:\Users\Home\Documents\basit-qureshi\backend
 .\venv\Scripts\python.exe -m tests.bench.bench_execution
 .\venv\Scripts\python.exe -m tests.bench.replay_policies
 .\venv\Scripts\python.exe -m tests.bench.run_phase_c
+.\venv\Scripts\python.exe -m tests.bench.collector_dryrun
 ```
+
+The last one drives a whole recorded session against the **fake** broker —
+grid placed, filled, flattened at the day's limit, settled, a revised figure
+corrected, a link dropped and restored — then exports the packet and scans it.
+It must end `rc 0`. It uses no terminal and no network. Its prices are a
+fixture, so it proves the *recorder* works and says nothing about results.
 
 ### A5. Collect diagnostics (redacted by construction)
 
@@ -167,9 +174,11 @@ Nothing below has been run. It needs the three risk numbers first (§E).
 `SYMBOL` matching Market Watch exactly, and the three risk numbers saved.
 
 **D1 — identity.** `/api/status` → confirm `account_verified` matches the demo
-account and `trade_mode` reads `demo` **from the broker**, not from the app
-label. The bot refuses to start if these disagree; confirm it refuses if you
-deliberately set the app to `real` against the demo terminal.
+account and `broker_trade_mode` reads `demo`. That field is what **the broker**
+classified the account as; `mode` next to it is what the app is set to. They
+are two different facts and the bot refuses to start when they disagree —
+confirm that yourself by setting the app to `real` against the demo terminal
+and watching it refuse.
 
 **D2 — ownership scope.** Open **one manual trade by hand** in MT5 on a
 different magic number. Confirm it never appears in the bot's Open trades panel
@@ -202,6 +211,130 @@ Confirm the day's accounting, any halt and the drawdown anchor all survive.
 own, a halt clears without you clearing it, the panel shows a confident zero
 while MT5 shows positions, or the daily marked reading disagrees with the
 account by more than the exit reserve.
+
+Record the session while you do this — §F.
+
+---
+
+## F. Recording a session and exporting the evidence
+
+A **recording** is not a trading session. Starting one writes files; it places
+no order and starts nothing. Stopping one stops writing files; it closes
+nothing and does not stop the bot. Nothing is recorded unless you start it.
+
+### F1. Pre-flight — run every line before connecting anything
+
+```powershell
+$api = "http://127.0.0.1:8000/api"
+$s = Invoke-RestMethod $api/status
+$s | Select-Object mode, broker_trade_mode, account_verified, symbol, halted,
+                   entries_paused, entry_block_reason, capital_floor_usd,
+                   basket_stop_loss_usd, max_daily_loss_usd, connected
+$s.day_risk
+Invoke-RestMethod $api/open-trades | Select-Object connected, pending_orders_known,
+                   pending_orders, @{n='positions';e={$_.positions.Count}}
+Invoke-RestMethod $api/ai-status   | Select-Object mode, model_loaded
+```
+
+Check, and do not start if any line fails:
+
+| Check | Required |
+| --- | --- |
+| Account identity | `account_verified` is the **demo** account you intend |
+| Broker classification | `broker_trade_mode` = `demo`, and `mode` = `demo` |
+| Symbol | `symbol` matches Market Watch **exactly**, suffix included |
+| Ownership scope | `/api/open-trades` shows only orders with your magic number; anything you opened by hand is absent |
+| Current exposure | you know what is open **before** you start, or you start flat |
+| Risk budgets | `capital_floor_usd`, `basket_stop_loss_usd`, `max_daily_loss_usd` are your saved numbers, not zeros (§E) |
+| Basket stop sanity | it exceeds ≈ $37.80, or admission will refuse every grid and say so |
+| Margin | `day_risk` is complete and `entry_block_reason` is not a margin or unknown block |
+| Halt state | `halted` is `null`. A halt that survived a restart is **not** noise — find out what caused it first |
+| AI | `mode` = `disabled`. A model has never been trained; there is nothing to enable |
+
+### F2. Start the recording
+
+```powershell
+Invoke-RestMethod -Method Post $api/session/start | ConvertTo-Json -Depth 5
+```
+
+This writes `backend\evidence\<session-id>.manifest.json` and
+`.events.jsonl`. It **starts no trading.** Note the `session_id`. A second
+start refuses rather than splitting one run across two files; pass
+`?replace=true` only if you mean to abandon the first.
+
+Confirm the manifest says what you expect — particularly
+`account_type: verified_demo`. If it says `unverified`, the broker has not been
+asked yet or did not answer, and the session will be labelled that way
+permanently. That is the field doing its job, not a bug to work around.
+
+### F3. During the session
+
+Watch the dashboard. Stop the run — press **Pause entries**, then follow §C —
+if any of these happen:
+
+- exposure appears that the bot does not own, or a position changes owner
+- the account identity changes mid-session
+- the panel shows a confident **zero** while MT5 shows positions
+- a halt clears without you clearing it, or does not fire when a budget breaks
+- the daily marked reading disagrees with the account by more than the exit reserve
+- an owner limit is breached, or overshot by more than the exit reserve
+- `/api/session/status` reports `dropped_events > 0` or `storage_errors` —
+  the record is no longer complete, so the session no longer evidences anything
+
+### F4. End the session in this order
+
+1. **Pause entries.** Existing positions stay managed.
+2. Wait for **0 positions AND 0 resting orders**, or press **Close positions**
+   and wait for the same confirmation. "unknown" is not zero.
+3. Stop the recording:
+   ```powershell
+   Invoke-RestMethod -Method Post $api/session/stop | ConvertTo-Json -Depth 5
+   ```
+4. Only then stop the backend, per §C.
+
+**Never kill the backend to end a recording while anything is open.** It is
+the only thing watching those positions — there is no broker-hosted stop.
+Stopping the recording is step 3 precisely so it is never a reason to skip
+step 2.
+
+### F5. Export the redacted packet
+
+```powershell
+cd C:\Users\Home\Documents\basit-qureshi\backend
+.\venv\Scripts\python.exe tools\export_session.py --list
+.\venv\Scripts\python.exe tools\export_session.py --session <session-id> `
+    --out C:\Users\Home\Documents\basit-qureshi\diagnostics\session.packet.json
+```
+
+The tool removes passwords, logins, server names, tokens and local database
+paths, replaces the account number with a stable `acct_…` reference, then scans
+the finished file and **refuses to write it** if anything private survived,
+naming the events to look at. If it refuses: read those events, and fix what
+logged that text. **Do not edit the event log to make it pass** — the log is
+the evidence.
+
+Check it yourself before sending. Both of these should print nothing:
+
+```powershell
+Select-String -Path ...\diagnostics\session.packet.json `
+    -Pattern 'password|mt5_login|MT5_SERVER|Exness-' -SimpleMatch
+Select-String -Path ...\diagnostics\session.packet.json -Pattern 'C:\\Users' -SimpleMatch
+```
+
+Send the **packet**. Never send the `evidence\` folder — it is unredacted by
+design, and it is what the packet is made from.
+
+### F6. What a session packet can and cannot settle
+
+It can settle: what the bot decided and why, what was open at each point, that
+a close was *confirmed* rather than merely sent, how long protective cycles
+took, where coverage was lost, and whether a figure was revised afterwards.
+
+It cannot settle whether the strategy makes money. A demo run is a handful of
+baskets on one stretch of market; with losses that can exceed wins, that
+separates nothing from variance. Read `close_intents_unconfirmed`,
+`coverage_gaps` and `corrections` first — a session with gaps in the wrong
+places evidences less than it looks like it does.
 
 ---
 
