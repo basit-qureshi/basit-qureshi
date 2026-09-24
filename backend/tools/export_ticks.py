@@ -112,6 +112,7 @@ def main(argv=None) -> int:
         return 2
     try:
         first_day, last_day = parse_day(args.start), parse_day(args.end)
+        requested_first_day = first_day
     except ValueError as exc:
         print(f"bad date: {exc}", file=sys.stderr)
         return 2
@@ -149,13 +150,18 @@ def main(argv=None) -> int:
         print(f"mt5.initialize() failed: {mt5.last_error()}", file=sys.stderr)
         return 4
     try:
-        return _export(mt5, args, out, manifest_path, first_day, last_day, existing_rows)
+        return _export(mt5, args, out, manifest_path, first_day, last_day,
+                       existing_rows, requested_first_day)
     finally:
         mt5.shutdown()
 
 
 def _export(mt5, args, out: Path, manifest_path: Path, first_day: date, last_day: date,
-            existing_rows: int) -> int:
+            existing_rows: int, requested_first_day: date | None = None) -> int:
+    # `first_day` may have been advanced by --resume. The manifest records what
+    # was REQUESTED and what THIS RUN covered as two separate facts, so a
+    # resumed export cannot look like a narrower request than it was.
+    requested_first_day = requested_first_day or first_day
     if not mt5.symbol_select(args.symbol, True):
         print(f"could not select {args.symbol}: {mt5.last_error()}. Check the exact "
               f"Market Watch name including the broker's suffix.", file=sys.stderr)
@@ -242,8 +248,11 @@ def _export(mt5, args, out: Path, manifest_path: Path, first_day: date, last_day
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "symbol_requested": args.symbol,
         "terminal_version": str(getattr(mt5, "version", lambda: "unknown")()),
-        "requested_range_utc": {"from": first_day.isoformat(), "to": last_day.isoformat(),
-                                "inclusive": True},
+        "requested_range_utc": {"from": requested_first_day.isoformat(),
+                                "to": last_day.isoformat(), "inclusive": True},
+        "covered_this_run_utc": {"from": first_day.isoformat(), "to": last_day.isoformat(),
+                                 "inclusive": True,
+                                 "resumed": first_day != requested_first_day},
         "rows_written_this_run": written,
         "rows_total_in_file": seq,
         "rows_skipped_no_finite_two_sided_quote": skipped_nonfinite,

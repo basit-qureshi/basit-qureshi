@@ -54,13 +54,37 @@ class SymbolSpec:
     pip_size: float
     pip_value_per_lot: float
     spread: float = 0.0
+    #: The EFFECTIVE distance the first level is placed at. It is the larger of a
+    #: broker requirement and an application heuristic; the three fields below
+    #: attribute it, and only this one changes placement.
     min_stop_distance: float = 0.0
+    broker_stop_level_distance: float = 0.0
+    app_stop_buffer: float = 0.0
+    app_spread_multiple_distance: float = 0.0
 
     @classmethod
     def from_broker(cls, info) -> "SymbolSpec":
         return cls(pip_size=info.pip_size, pip_value_per_lot=info.pip_value_per_lot,
                    spread=getattr(info, "spread", 0.0) or 0.0,
-                   min_stop_distance=getattr(info, "min_stop_distance", 0.0) or 0.0)
+                   min_stop_distance=getattr(info, "min_stop_distance", 0.0) or 0.0,
+                   broker_stop_level_distance=getattr(info, "broker_stop_level_distance", 0.0) or 0.0,
+                   app_stop_buffer=getattr(info, "app_stop_buffer", 0.0) or 0.0,
+                   app_spread_multiple_distance=getattr(
+                       info, "app_spread_multiple_distance", 0.0) or 0.0)
+
+    @property
+    def broker_required_distance(self) -> float:
+        """What the BROKER requires, with nothing of ours added."""
+        return self.broker_stop_level_distance
+
+    @property
+    def app_added_distance(self) -> float:
+        """How much of the effective distance is this application's choice.
+
+        Zero when the broker's own requirement is the binding term. Positive when
+        our buffer or our spread multiple is what pushed the levels out.
+        """
+        return max(0.0, self.min_stop_distance - self.broker_stop_level_distance)
 
 
 @dataclass(frozen=True)

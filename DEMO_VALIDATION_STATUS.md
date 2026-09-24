@@ -14,7 +14,7 @@ integration, evidence, connected verification and activation.
 
 | Question | Answer |
 | --- | --- |
-| Do the **offline checks** pass? | **Yes.** 388 backend tests, 4 frontend tests, lint clean, build clean, and a fixture dry-run that records a full session and exports it. Offline, against fake brokers — see §7.8 for what that does and does not establish. |
+| Do the **offline checks** pass? | **Yes.** 404 backend tests, 4 frontend tests, lint clean, build clean, and a fixture dry-run that records a full session and exports it. Offline, against fake brokers — see §7.8 for what that does and does not establish. |
 | Is a **demo session ready to run**? | **Prepared, not authorized to start.** The collector, the export and the procedure exist. It is blocked on three owner risk numbers (`OWNER_RUNBOOK.md` §E). |
 | Has an **actual session occurred**? | **No.** Zero sessions recorded. Zero demo trades. Zero live trades. |
 | Is **profitability supported**? | **No. Trading performance is not measured.** There is no market data and no session data, so there is nothing to measure it from. |
@@ -420,3 +420,130 @@ frontend npm run build                            -> clean
 databases in one Linux container. They are not evidence about runtime behaviour
 on Windows, against a real terminal, or under real market conditions — and no
 count of them would be.
+
+---
+
+## 8. Focused review round — five corrections
+
+### 8.1 Broker stop distance is not the same thing as this app's buffer
+
+`min_stop_distance` was one number that silently merged three, one of them a
+broker rule and two of them ours. They are now carried separately through
+`SymbolInfo`, `grid_math.SymbolSpec` and `/api/status`, with the effective value
+— and therefore actual placement — **unchanged**:
+
+| Term | Whose | Value on MT5 |
+| --- | --- | --- |
+| `broker_stop_level_distance` | **the broker's** | `trade_stops_level × point` |
+| `app_stop_buffer` | **ours** (`APP_STOP_BUFFER_POINTS = 5`) | 5 points, only when the broker declares a minimum |
+| `app_spread_multiple_distance` | **ours** (`APP_SPREAD_MULTIPLE = 3.0`) | `spread × 3`. No broker states this rule |
+
+Effective distance is `max(broker + buffer, spread × 3)`, exactly as before; the
+first grid level goes at `max(grid distance, effective)`.
+
+**What this exposed.** On gold at the fixture's own 0.24 spread, the *app's*
+spread multiple gives 0.72 — wider than the 0.30 grid distance — so an
+application choice, not a broker requirement, moves every level:
+
+| Effective first step | Set by | Estimate |
+| --- | --- | --- |
+| 0.30 | the grid distance (the test double declares no minimum at all) | **37.80** |
+| 0.72 | **this app's** spread × 3, at spread 0.24 | **46.20** |
+| 1.05 | a broker declaring 100 points, **plus this app's 5** | **52.80** |
+
+So the `37.80` quoted throughout earlier reports is not merely fixture-specific —
+it is lower than what the real adapter would produce on the *same spread*,
+because the test double bypasses the app's own heuristic. Pinned by
+`test_the_app_heuristic_not_the_broker_is_what_binds_on_gold`. The live split is
+readable at `/api/status` → `stop_distance`, alongside
+`completed_grid_estimate`.
+
+Placement is untouched: no setting changed, and the full suite still passes.
+
+### 8.2 Admission and excluded closing costs
+
+**The claim that is now corrected.** The report used to print `FITS` against a
+budget. That was an unsupported claim of budget compatibility: admission compares
+the **entry-side estimate** against a budget and nothing more, and the
+remaining-daily figure it compares against (`marked_result`) excludes the exit
+reserve as well. **Neither side of the comparison carries a closing-cost
+buffer.**
+
+The verdict now reads "entry-side estimate fits, X left over", followed by
+whether X covers closing costs — and if any component is missing it says the
+answer is **NOT established**, by the report or by admission.
+
+Closing costs are taken only from owner-supplied figures
+(`--commission-per-lot-per-side`, `--exit-spread`,
+`--slippage-points-per-fill`). Anything not supplied prints **UNKNOWN**, never
+zero, and no total is claimed while any component is unknown. **Swap is always
+UNKNOWN** — it depends on nights held and this tool does not model it. No fee is
+invented, no limit is raised, and no unknown is treated as zero. Pinned by
+`test_the_report_refuses_to_total_unknown_closing_costs` and
+`test_supplied_closing_costs_are_used_and_compared`.
+
+The engine is unchanged here by design: adding a closing-cost buffer to
+admission would require a fee figure nobody has supplied. The gap is reported
+rather than papered over. `_estimated_exit_cost()` already returns `None` rather
+than zero when costs are unknown, and the profit path already refuses to claim a
+target on an unknown cost.
+
+### 8.3 The three closure causes, and the late-exposure policy
+
+The late-exposure test was rewritten once because it conflated causes. They are
+now separated, named in the test file, and each has coverage:
+
+| Cause | Latches entries? | Halt? | Late owned exposure |
+| --- | --- | --- | --- |
+| **Profit close** | no | no | **managed** — marked, valued, closed when a limit fires; not closed on sight. No new grid while it is open |
+| **Basket stop close** | **yes** | no | **managed** under the same limits, entries stay paused |
+| **Loss halt** (daily loss / drawdown) | **yes** | **yes** | **closed by the protective policy, immediately**, and entries stay paused while that happens |
+
+New regressions in `tests/test_close_lifecycle.py` (15 tests total):
+
+- `test_a_profit_close_retires_its_intent_without_latching` — counted as won,
+  entries not paused, admission willing again
+- `test_a_basket_stop_close_retires_its_intent_and_does_latch` — counted as
+  stopped, entries paused, **not** a halt, no same-candle replacement
+- `test_late_exposure_after_a_profit_close_is_managed_not_closed_on_sight` —
+  managed, no grid placed on top of it, closed once it passes the basket stop
+- `test_late_exposure_after_a_loss_halt_is_closed_while_entries_stay_paused` —
+  closed immediately, halt still set, entries still paused, gate still `HALTED`,
+  no grid placed
+- `test_a_halt_closes_late_exposure_repeatedly_not_only_once` — the re-open
+  branch is not one-shot
+- `test_a_halt_does_not_close_a_manual_trade_it_does_not_own` — ownership by
+  magic number holds through all of it
+
+### 8.4 Windows export instructions corrected
+
+The previous revision used `^` for line continuation inside PowerShell blocks.
+`^` is cmd.exe's continuation character and does nothing useful in PowerShell, so
+those commands would have failed as written. Every command in `OWNER_RUNBOOK.md`
+is now a **single line**; there are zero `^` continuations left in the file.
+
+The export command was then verified offline, as the exact argv, against a fake
+MT5 module over a Thursday–Monday range: five inclusive days, five bounded
+requests, 15 rows, weekend classified as an ordinary closure,
+`unexplained_gaps` empty, manifest at `data\xauusdm_ticks.csv.manifest.json`.
+Regression: `test_the_documented_single_line_command_works_end_to_end`.
+
+Also fixed: after `--resume` the manifest recorded the *resumed* start as the
+requested range. It now carries `requested_range_utc` and
+`covered_this_run_utc` (with `resumed: true/false`) as separate facts.
+Regression: `test_the_manifest_separates_what_was_requested_from_what_this_run_covered`.
+
+No terminal was contacted for any of this.
+
+### 8.5 Verification for this round
+
+```
+backend  python3 -m pytest -q                     -> 404 passed
+backend  python3 -m compileall -q app tools       -> OK
+backend  python3 -m tests.bench.collector_dryrun  -> rc 0
+frontend npm test                                 -> 4 passed
+```
+
+404 passing tests are assertions against fake brokers and temporary databases in
+one Linux container. No terminal, no order, no session, and trading performance
+is still not measured.

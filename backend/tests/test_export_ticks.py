@@ -285,3 +285,48 @@ def test_a_reversed_range_is_refused(fake_mt5, tmp_path):
     fake_mt5()
     assert export_ticks.main(["--symbol", "XAUUSDm", "--from", "2026-06-26",
                               "--to", "2026-06-25", "--out", str(tmp_path / "t.csv")]) == 2
+
+
+def test_the_manifest_separates_what_was_requested_from_what_this_run_covered(fake_mt5, tmp_path):
+    """A resumed export must not look like a narrower request than it was."""
+    days = [datetime(2026, 9, 17, tzinfo=UTC).date() + timedelta(days=i) for i in range(2)]
+    fake_mt5(ticks_by_day={d: ticks_for(d) for d in days})
+    out = tmp_path / "t.csv"
+    export_ticks.main(["--symbol", "XAUUSDm", "--from", "2026-09-17", "--to", "2026-09-17",
+                       "--out", str(out)])
+    export_ticks.main(["--symbol", "XAUUSDm", "--from", "2026-09-17", "--to", "2026-09-18",
+                       "--out", str(out), "--resume"])
+
+    manifest = json.loads((tmp_path / "t.csv.manifest.json").read_text())
+    assert manifest["requested_range_utc"]["from"] == "2026-09-17", (
+        "the resumed run rewrote the requested range"
+    )
+    assert manifest["covered_this_run_utc"]["from"] == "2026-09-18"
+    assert manifest["covered_this_run_utc"]["resumed"] is True
+
+
+def test_the_documented_single_line_command_works_end_to_end(fake_mt5, tmp_path):
+    """Exactly the argv the runbook's single-line command produces.
+
+    Thursday and Friday carry data, Saturday and Sunday are closed, Monday
+    carries data. Five inclusive days, five bounded requests, no false gap.
+    """
+    data = {}
+    for iso in ("2026-09-17", "2026-09-18", "2026-09-21"):
+        day = datetime.fromisoformat(iso).date()
+        data[day] = ticks_for(day, count=5)
+    stub = fake_mt5(ticks_by_day=data)
+    out = tmp_path / "data" / "xauusdm_ticks.csv"
+
+    code = export_ticks.main(["--symbol", "XAUUSDm", "--from", "2026-09-17",
+                              "--to", "2026-09-21", "--out", str(out)])
+    assert code == 0
+    assert stub.calls.count("copy_ticks_range") == 5, "five inclusive days, five requests"
+    assert len(read_csv(out)) == 15
+
+    manifest = json.loads((tmp_path / "data" / "xauusdm_ticks.csv.manifest.json").read_text())
+    assert manifest["unexplained_gaps"] == []
+    assert manifest["days_with_no_rows_expected_closed"] == 2, "the weekend"
+    assert manifest["coverage_is_complete"] is True
+    assert manifest["requested_range_utc"] == {"from": "2026-09-17", "to": "2026-09-21",
+                                               "inclusive": True}

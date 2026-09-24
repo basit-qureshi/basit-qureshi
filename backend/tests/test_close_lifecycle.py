@@ -220,3 +220,154 @@ def test_a_manual_trade_is_never_closed_by_any_of_this(broker, engine_factory):
     surviving = {p.ticket for p in broker.get_open_positions("XAUUSD")}
     assert manual.ticket in surviving, "the bot closed a trade it does not own"
     assert broker.get_open_positions("XAUUSD", magic=MAGIC) == []
+
+
+# --- the three closure causes are not the same policy -------------------------
+#
+# The late-exposure test was rewritten once because it conflated them. Written
+# out, so nothing conflates them again:
+#
+#   PROFIT close      -> non-latching. Entries may resume, same candle. Late
+#                        owned exposure is MANAGED, and closed when a limit
+#                        fires; it is not closed on sight.
+#   BASKET STOP close -> latching. Entries stay paused until the owner resumes.
+#                        Late owned exposure is still MANAGED under the limits.
+#   LOSS HALT         -> the strongest state. Late owned exposure is CLOSED by
+#                        the protective policy, immediately, and entries stay
+#                        paused while that happens.
+
+def profitable_basket(broker, engine):
+    """A basket whose net clears its target, so the profit path closes it."""
+    engine._tick()
+    broker.next_candle()
+    engine._tick()
+    broker.price += 4.0                       # buy side fills
+    broker.next_candle()
+    engine._tick()
+    for order in list(orders(broker)):
+        broker.cancel_pending_order(order.ticket)
+    broker.price += 6.0                       # and runs in favour
+    engine._protective_tick()
+
+
+def test_a_profit_close_retires_its_intent_without_latching(broker, engine_factory):
+    e = engine_factory(**live(basket_take_profit_usd=10.0))
+    profitable_basket(broker, e)
+
+    assert broker.get_open_positions("XAUUSD", magic=MAGIC) == []
+    assert e._close_intent is None, "a confirmed profit close kept its intent"
+    assert e._baskets_won == 1
+    assert e._entries_paused is False, "a profit close must not latch entries"
+    assert e._halt_reason is None
+    # Not latched means admission is willing again. The `_profit_restart_pending`
+    # flag is not asserted directly because the reporting half of the same tick
+    # consumes it by placing the replacement — which is the behaviour itself.
+    allowed, reason = e._entry_gate(broker.get_account_info())
+    assert allowed is True, f"a profit close left entries refused: {reason}"
+
+
+def test_a_basket_stop_close_retires_its_intent_and_does_latch(broker, engine_factory):
+    e = engine_factory(**live())
+    held = filled_basket(broker, e)
+    e._open_close_intent("basket_stop", "basket stop hit (-41.00)")
+    e._drive_close_intent(held, [])
+
+    assert e._close_intent is None
+    assert e._baskets_stopped == 1 and e._baskets_won == 0
+    assert e._entries_paused is True, "a loss close must latch entries"
+    assert e._halt_reason is None, "a basket stop is not a halt"
+    assert e._profit_restart_pending is False, "a loss must not enable a replacement"
+
+
+def test_late_exposure_after_a_profit_close_is_managed_not_closed_on_sight(broker, engine_factory):
+    e = engine_factory(**live(basket_take_profit_usd=10.0))
+    profitable_basket(broker, e)
+    assert e._entries_paused is False
+
+    late = broker.open_position(OrderSide.BUY, broker.price, magic=MAGIC)
+    e._protective_tick()
+    assert late.ticket in e._last_marks, "the position was not being marked"
+    assert broker.get_open_positions("XAUUSD", magic=MAGIC), (
+        "a position at no loss was closed on sight after a PROFIT close"
+    )
+
+    e._reporting_tick()
+    assert orders(broker) == [], (
+        "a new grid was placed on top of exposure that is already open"
+    )
+
+    broker.price -= 70.0                      # now past the basket stop
+    e._protective_tick()
+    assert broker.get_open_positions("XAUUSD", magic=MAGIC) == [], (
+        "owned exposure passed the basket stop and was not closed"
+    )
+
+
+def test_late_exposure_after_a_loss_halt_is_closed_while_entries_stay_paused(broker,
+                                                                            engine_factory):
+    """The protective closure policy, and the pause, at the same time.
+
+    A halt is the strongest refusal in the system. Exposure that appears after
+    its close confirmed must be removed by the protective policy — and removing
+    it must not be read as permission to trade again.
+    """
+    e = engine_factory(**live(max_daily_loss_usd=40.0))
+    held = filled_basket(broker, e)
+    broker.price -= 12.0                      # drive the day past its limit
+    broker.next_candle()
+    e._tick()
+    assert e._halt_reason is not None and "daily loss" in e._halt_reason
+    assert broker.get_open_positions("XAUUSD", magic=MAGIC) == []
+    paused_reason = e._pause_reason
+
+    late = broker.open_position(OrderSide.BUY, broker.price, magic=MAGIC)
+    assert broker.get_open_positions("XAUUSD", magic=MAGIC), "fixture: exposure must exist"
+
+    e._protective_tick()
+
+    assert broker.get_open_positions("XAUUSD", magic=MAGIC) == [], (
+        "a halted engine left owned exposure open"
+    )
+    assert e._halt_reason is not None, "the halt was cleared by closing the exposure"
+    assert e._entries_paused is True, "entries resumed while halted"
+    assert e._pause_reason == paused_reason or e._pause_reason, "the pause reason vanished"
+    allowed, reason = e._entry_gate(broker.get_account_info())
+    assert allowed is False and reason.startswith("HALTED"), reason
+
+    e._reporting_tick()
+    assert orders(broker) == [], "a grid was placed while halted"
+    assert late.ticket not in {p.ticket for p in broker.get_open_positions("XAUUSD")}
+
+
+def test_a_halt_closes_late_exposure_repeatedly_not_only_once(broker, engine_factory):
+    """Two late fills, two closures. The re-open branch must not be one-shot."""
+    e = engine_factory(**live(max_daily_loss_usd=40.0))
+    held = filled_basket(broker, e)
+    broker.price -= 12.0
+    broker.next_candle()
+    e._tick()
+    assert e._halt_reason is not None
+
+    for _ in range(2):
+        broker.open_position(OrderSide.BUY, broker.price, magic=MAGIC)
+        e._protective_tick()
+        assert broker.get_open_positions("XAUUSD", magic=MAGIC) == []
+    assert e._entries_paused is True
+
+
+def test_a_halt_does_not_close_a_manual_trade_it_does_not_own(broker, engine_factory):
+    e = engine_factory(**live(max_daily_loss_usd=40.0))
+    manual = broker.open_position(OrderSide.SELL, broker.price, magic=222333)
+    filled_basket(broker, e)
+    broker.price -= 12.0
+    broker.next_candle()
+    e._tick()
+    assert e._halt_reason is not None
+
+    broker.open_position(OrderSide.BUY, broker.price, magic=MAGIC)
+    e._protective_tick()
+
+    assert broker.get_open_positions("XAUUSD", magic=MAGIC) == []
+    assert manual.ticket in {p.ticket for p in broker.get_open_positions("XAUUSD")}, (
+        "the halt reached a trade the bot does not own"
+    )

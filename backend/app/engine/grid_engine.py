@@ -206,6 +206,9 @@ class GridEngine:
         self._last_heartbeat_shape: tuple | None = None
         self._link_up: bool | None = None
         self._broker_trade_mode = "unchecked"
+        #: Last completed-grid estimate, with its components, so the dashboard
+        #: can show the owner THEIR number rather than a figure from a fixture.
+        self._last_grid_estimate = None
         # ticket -> the settlement event it was first recorded in, so a later
         # revision links a correction instead of rewriting the original.
         self._settlement_events: dict[str, tuple[str, float | None]] = {}
@@ -1422,7 +1425,20 @@ class GridEngine:
             )
 
         # 2. The grid must be able to finish building inside that budget.
-        frozen = self._completed_grid_loss(price, info)
+        estimate = self._completed_grid_estimate(price, info)
+        frozen = estimate.total
+        self._last_grid_estimate = {
+            "total": estimate.total,
+            "displacement_component": estimate.displacement_cost,
+            "entry_spread_component": estimate.entry_spread_cost,
+            "first_step": round(estimate.first_step, 6),
+            "fills_if_all_filled": estimate.fills,
+            "reference_price": price,
+            "scenario": "every level filled, equal volume both sides, valued back "
+                        "at the reference price, entry spread once per fill",
+            "excludes": list(grid_math.EXCLUDED_FROM_ESTIMATE),
+            "is_maximum_loss": False,
+        }
         budget = self.basket_stop_loss_usd if self.basket_stop_loss_usd > 0 else spendable
         if frozen > budget:
             lots = (self.buy_stop_levels + self.sell_stop_levels) * self.lot_size
@@ -2229,6 +2245,16 @@ class GridEngine:
                 round(self._last_quote.local_age_ms(), 1) if self._last_quote else None
             ),
             "quote_missing": bool(self._last_quote and self._last_quote.missing),
+            # Where the first grid level's distance comes from, split between the
+            # broker's requirement and this application's own additions. Read it
+            # before quoting a completed-grid figure: the app's spread multiple is
+            # usually the binding term on gold, and it is not a broker rule.
+            "stop_distance": (
+                self._last_symbol_info.stop_distance_breakdown()
+                if self._last_symbol_info is not None
+                and hasattr(self._last_symbol_info, "stop_distance_breakdown") else None
+            ),
+            "completed_grid_estimate": self._last_grid_estimate,
             "execution_timing": self._timing.report(),
             # The marked daily risk measure, alongside the realised cards below.
             # They are different quantities and are not expected to agree while

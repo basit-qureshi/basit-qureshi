@@ -16,6 +16,19 @@ from app.brokers.base import (
     SymbolInfo,
 )
 
+#: APPLICATION CHOICES, not broker requirements. Both widen the distance the
+#: first grid level is placed at, and therefore widen the completed-grid
+#: estimate that admission compares against the owner's budgets. They are named
+#: constants so the effect is attributable instead of buried in an expression.
+#:
+#: Added to the broker's declared minimum so rounding, or a price move between
+#: our calculation and the order reaching MT5, does not make a legal stop
+#: illegal. In points.
+APP_STOP_BUFFER_POINTS = 5
+#: Fallback for brokers that declare no minimum yet still reject a stop inside
+#: the live spread. No broker states this rule; it is this application's.
+APP_SPREAD_MULTIPLE = 3.0
+
 _TIMEFRAME_MAP = {
     "M1": 1,
     "M5": 5,
@@ -152,20 +165,31 @@ class MT5Broker(BrokerAdapter):
         tick_value = info.trade_tick_value or 1.0
         tick_size = info.trade_tick_size or info.point
         pip_value_per_lot = (pip_size / tick_size) * tick_value if tick_size else tick_value * 10
-        # Broker's minimum SL/TP distance from the current price, in price units.
-        # A tighter stop than this gets rejected with "Invalid stops" — Gold and
-        # other non-forex-major symbols often require a much wider distance than
-        # forex pairs do. A few extra points of buffer avoids rejections from
-        # rounding/price movement between our calculation and the order reaching MT5.
+        # Three separate quantities, deliberately not merged into one number
+        # until the last line. A tighter stop than the broker allows is rejected
+        # with "Invalid stops"; gold and other non-forex symbols often require a
+        # much wider distance than forex pairs do.
+        #
+        # 1. BROKER REQUIREMENT: what the terminal declares, and nothing else.
         stops_level_points = getattr(info, "trade_stops_level", 0) or 0
-        stops_level_distance = (stops_level_points + 5) * info.point if stops_level_points else 0.0
-        # Some brokers report trade_stops_level=0 (no declared minimum) yet still
-        # reject a stop that doesn't clear the live spread — Gold's spread alone
-        # can be wider than a "normal" pip-based stop. Use whichever is larger.
+        broker_stop_level_distance = stops_level_points * info.point
+        # 2. APPLICATION BUFFER: ours, not the broker's. A few points so that
+        #    rounding, or a price move between our calculation and the order
+        #    reaching MT5, does not turn a legal stop into a rejected one. Only
+        #    added when the broker actually declared a minimum.
+        app_stop_buffer = (APP_STOP_BUFFER_POINTS * info.point) if stops_level_points else 0.0
+        # 3. APPLICATION HEURISTIC: also ours. Some brokers report
+        #    trade_stops_level = 0 yet still reject a stop that does not clear
+        #    the live spread, and gold's spread alone can be wider than a
+        #    "normal" pip-based stop. This is not a rule any broker states, and
+        #    on a wide spread it is usually the binding term — which pushes
+        #    every grid level further out. It is reported separately for exactly
+        #    that reason.
         tick = mt5.symbol_info_tick(symbol)
         spread = (tick.ask - tick.bid) if tick else 0.0
-        spread_based_distance = spread * 3
-        min_stop_distance = max(stops_level_distance, spread_based_distance)
+        app_spread_multiple_distance = spread * APP_SPREAD_MULTIPLE
+        min_stop_distance = max(broker_stop_level_distance + app_stop_buffer,
+                                app_spread_multiple_distance)
         return SymbolInfo(
             symbol=symbol,
             pip_size=pip_size,
@@ -174,6 +198,10 @@ class MT5Broker(BrokerAdapter):
             volume_step=info.volume_step,
             min_stop_distance=min_stop_distance,
             spread=spread,
+            broker_stop_level_distance=broker_stop_level_distance,
+            app_stop_buffer=app_stop_buffer,
+            app_spread_multiple_distance=app_spread_multiple_distance,
+            app_spread_multiple=APP_SPREAD_MULTIPLE,
         )
 
     @_synchronized

@@ -92,8 +92,50 @@ class SymbolInfo:
     pip_value_per_lot: float  # profit/loss per pip per 1.0 lot, in account currency
     min_volume: float
     volume_step: float
-    min_stop_distance: float = 0.0  # broker's minimum SL/TP distance from price, in price units
+    #: The distance actually used to place the first grid level, in price units.
+    #: It is the LARGER of a broker requirement and an application heuristic, and
+    #: the three fields below say which is which. Do not read this field as "what
+    #: the broker requires": it usually is not.
+    min_stop_distance: float = 0.0
     spread: float = 0.0  # current ask - bid, in price units
+    # --- where `min_stop_distance` comes from, kept separate ------------------
+    # Conflating these hid an application choice behind a broker name. The
+    # spread-multiple heuristic below is this app's invention, not a rule any
+    # broker states, and on a wide spread it is usually the binding one — which
+    # pushes every grid level further out and raises the completed-grid estimate.
+    #: `trade_stops_level * point` exactly as the broker reports it, no buffer.
+    broker_stop_level_distance: float = 0.0
+    #: Extra distance THIS APPLICATION adds on top of the broker's figure, to
+    #: survive rounding and price movement between calculation and submission.
+    app_stop_buffer: float = 0.0
+    #: This application's fallback for brokers that declare no minimum yet still
+    #: reject a stop inside the live spread. A multiple of the spread.
+    app_spread_multiple_distance: float = 0.0
+    #: The multiple used above, so a reader does not have to divide to find it.
+    app_spread_multiple: float = 0.0
+
+    @property
+    def stop_distance_binding(self) -> str:
+        """Which input is actually setting the first grid step."""
+        broker_side = self.broker_stop_level_distance + self.app_stop_buffer
+        if not self.min_stop_distance:
+            return "none"
+        if self.app_spread_multiple_distance > broker_side:
+            return "app_spread_multiple"
+        if self.app_stop_buffer and self.broker_stop_level_distance:
+            return "broker_stop_level_plus_app_buffer"
+        return "broker_stop_level" if self.broker_stop_level_distance else "app_spread_multiple"
+
+    def stop_distance_breakdown(self) -> dict:
+        return {
+            "effective_min_stop_distance": round(self.min_stop_distance, 6),
+            "broker_stop_level_distance": round(self.broker_stop_level_distance, 6),
+            "app_stop_buffer": round(self.app_stop_buffer, 6),
+            "app_spread_multiple": self.app_spread_multiple,
+            "app_spread_multiple_distance": round(self.app_spread_multiple_distance, 6),
+            "binding": self.stop_distance_binding,
+            "spread": round(self.spread, 6),
+        }
     # Whether the broker's reported floating profit is already struck at the
     # executable closing side (bid for a long, ask for a short). When it is,
     # subtracting a further half-spread per position double-counts the exit.

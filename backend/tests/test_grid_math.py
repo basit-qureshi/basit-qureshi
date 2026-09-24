@@ -138,11 +138,19 @@ def test_the_gate_measures_the_grid_that_is_actually_placed(broker, engine_facto
 
 
 def test_the_offline_report_prints_the_same_number(capsys):
+    """Fixture semantics require --app-spread-multiple 0.
+
+    The FakeBroker reports no minimum stop distance at all, so reproducing the
+    fixture's 37.80 means switching off the app heuristic the real adapter
+    applies. That the two differ is the point of
+    `test_the_app_heuristic_not_the_broker_is_what_binds_on_gold`.
+    """
     from tools import grid_fit_report
 
-    assert grid_fit_report.main(["--basket-stop", "60"]) == 0
+    assert grid_fit_report.main(["--basket-stop", "60", "--app-spread-multiple", "0"]) == 0
     printed = capsys.readouterr().out
     expected = grid_math.completed_grid_estimate(4000.0, TEN_BY_TEN, GOLD_FIXTURE).total
+    assert expected == 37.80
     assert f"{expected:.2f}" in printed
     assert "FIXTURE" in printed, "the report must label fixture inputs as fixtures"
     assert "NOT a maximum loss" in printed
@@ -155,3 +163,124 @@ def test_the_report_judges_only_the_budgets_it_was_given(capsys):
     printed = capsys.readouterr().out
     assert "none stated" in printed
     assert "REFUSED" not in printed, "nothing may be judged against a budget nobody gave"
+
+
+# --- broker requirement versus this application's own additions ---------------
+#
+# `min_stop_distance` is the larger of a broker requirement and an application
+# heuristic. Conflating them hid an app choice behind a broker-sounding name, and
+# the heuristic is usually the binding one on gold.
+
+def adapter_spec(*, spread, stops_level_points=0, point=0.01,
+                 buffer_points=5, multiple=3.0):
+    """What the MT5 adapter would build, without importing MetaTrader5."""
+    broker = stops_level_points * point
+    buffer_ = (buffer_points * point) if stops_level_points else 0.0
+    spread_side = spread * multiple
+    return grid_math.SymbolSpec(
+        pip_size=point, pip_value_per_lot=1.0, spread=spread,
+        min_stop_distance=max(broker + buffer_, spread_side),
+        broker_stop_level_distance=broker, app_stop_buffer=buffer_,
+        app_spread_multiple_distance=spread_side)
+
+
+def test_the_app_heuristic_not_the_broker_is_what_binds_on_gold():
+    """The fixture reports NO minimum distance, so tests see 37.80. The MT5
+    adapter, on the same 0.24 spread, applies its own spread x 3 and gets 0.72 —
+    wider than the 0.30 grid distance — which moves every level.
+
+    displacement: 10*0.72 + 0.30*(0+..+9) = 7.20 + 13.50 = 20.70 per side,
+    41.40 both. entry spread: 24 points * 0.01 * 1.0 * 20 = 4.80. Total 46.20.
+    """
+    spec = adapter_spec(spread=0.24)
+    assert spec.broker_required_distance == 0.0, "the broker declared nothing"
+    assert spec.app_added_distance == 0.72, "every bit of this is the app's choice"
+
+    est = grid_math.completed_grid_estimate(4000.0, TEN_BY_TEN, spec)
+    assert est.first_step == 0.72
+    assert est.total == 46.20
+    fixture_total = grid_math.completed_grid_estimate(4000.0, TEN_BY_TEN, GOLD_FIXTURE).total
+    assert fixture_total == 37.80
+    assert est.total > fixture_total, (
+        "the adapter's own heuristic makes the live figure LARGER than the "
+        "fixture's, which is why the fixture number must never be quoted as "
+        "the owner's number"
+    )
+
+
+def test_a_declared_broker_minimum_is_attributed_to_the_broker():
+    """stops_level 100 points = 1.00, plus the app's 5-point buffer = 1.05,
+    which beats spread x 3 = 0.72, so the broker's requirement binds."""
+    spec = adapter_spec(spread=0.24, stops_level_points=100)
+    assert spec.broker_required_distance == 1.00
+    assert spec.app_added_distance == pytest.approx(0.05), "only the buffer is ours"
+    est = grid_math.completed_grid_estimate(4000.0, TEN_BY_TEN, spec)
+    assert est.first_step == pytest.approx(1.05)
+    # displacement 10*1.05 + 0.30*(0+..+9) = 10.50 + 13.50 = 24.00 per side,
+    # 48.00 both; entry spread 24 points * 0.01 * 1.0 * 20 = 4.80. Total 52.80.
+    assert est.total == 52.80
+
+
+def test_the_app_buffer_is_not_applied_when_the_broker_declares_nothing():
+    """Adding a buffer to a requirement that does not exist would invent one."""
+    spec = adapter_spec(spread=0.01, stops_level_points=0)
+    assert spec.app_stop_buffer == 0.0
+    assert spec.min_stop_distance == pytest.approx(0.03), "spread x 3 only"
+
+
+def test_the_breakdown_survives_the_trip_through_the_broker_object(broker):
+    """SymbolSpec.from_broker must carry the attribution, not just the total."""
+    info = broker.get_symbol_info("XAUUSD")
+    spec = grid_math.SymbolSpec.from_broker(info)
+    assert spec.min_stop_distance == info.min_stop_distance
+    assert spec.broker_stop_level_distance == getattr(info, "broker_stop_level_distance", 0.0)
+
+
+def test_symbol_info_reports_which_term_is_binding():
+    from app.brokers.base import SymbolInfo
+
+    app_bound = SymbolInfo("XAUUSDm", 0.01, 1.0, 0.01, 0.01, min_stop_distance=0.72,
+                           spread=0.24, broker_stop_level_distance=0.0,
+                           app_spread_multiple_distance=0.72, app_spread_multiple=3.0)
+    assert app_bound.stop_distance_binding == "app_spread_multiple"
+    broker_bound = SymbolInfo("XAUUSDm", 0.01, 1.0, 0.01, 0.01, min_stop_distance=1.05,
+                              spread=0.24, broker_stop_level_distance=1.00,
+                              app_stop_buffer=0.05, app_spread_multiple_distance=0.72,
+                              app_spread_multiple=3.0)
+    assert broker_bound.stop_distance_binding == "broker_stop_level_plus_app_buffer"
+    breakdown = broker_bound.stop_distance_breakdown()
+    assert breakdown["broker_stop_level_distance"] == 1.00
+    assert breakdown["app_stop_buffer"] == 0.05
+
+
+def test_the_report_prints_the_attribution_and_names_the_binding_term(capsys):
+    from tools import grid_fit_report
+
+    grid_fit_report.main(["--spread", "0.24"])
+    printed = capsys.readouterr().out
+    assert "broker's own minimum" in printed
+    assert "this app's buffer" in printed
+    assert "THIS APP's spread multiple" in printed, "the binding term is not named"
+    assert "46.20" in printed, "the adapter-semantics figure is not shown"
+
+
+def test_the_report_refuses_to_total_unknown_closing_costs(capsys):
+    from tools import grid_fit_report
+
+    grid_fit_report.main(["--basket-stop", "60"])
+    printed = capsys.readouterr().out
+    assert "UNKNOWN" in printed
+    assert "no total is claimed" in printed
+    assert "NOT established by this report" in printed, (
+        "a pass on the entry-side estimate was presented as budget compatibility"
+    )
+
+
+def test_supplied_closing_costs_are_used_and_compared(capsys):
+    from tools import grid_fit_report
+
+    grid_fit_report.main(["--basket-stop", "60", "--commission-per-lot-per-side", "2.75",
+                          "--slippage-points-per-fill", "1"])
+    printed = capsys.readouterr().out
+    assert "UNKNOWN   depends on nights held" in printed, "swap must stay unknown"
+    assert "exit commission" in printed and "0.55" in printed   # 2.75 x 0.20 lots

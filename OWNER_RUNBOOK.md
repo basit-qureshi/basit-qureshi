@@ -50,7 +50,7 @@ cd C:\Users\Home\Documents\basit-qureshi\backend
 .\venv\Scripts\python.exe -m pip install -r requirements.txt -r requirements-mt5.txt
 .\venv\Scripts\python.exe -m pytest -q
 ```
-Expect **388 passed**. Anything else, stop and send the output.
+Expect **404 passed**. Anything else, stop and send the output.
 
 ```powershell
 cd C:\Users\Home\Documents\basit-qureshi\frontend
@@ -118,85 +118,160 @@ Copy-Item backend\trading_bot.bak.db        backend\trading_bot.db        -Force
 
 ### A7. Your own completed-grid number — offline, no terminal, no risk
 
+Every line below is a **single line**. Do not break them: `^` is cmd.exe's
+continuation and does nothing useful in PowerShell, and an earlier revision of
+this runbook wrongly used it.
+
 ```powershell
 cd C:\Users\Home\Documents\basit-qureshi\backend
 .\venv\Scripts\python.exe tools\grid_fit_report.py --assumptions
-.\venv\Scripts\python.exe tools\grid_fit_report.py --alternatives ^
-    --spread 0.25 --min-stop-distance 0.75 ^
-    --basket-stop 60 --daily-loss 100 --balance 1000 --floor 800
 ```
 
-Reads nothing, opens no terminal, cannot place an order. Every input is printed
-back with its provenance, so a FIXTURE value is never mistaken for your
-broker's. Read your live `spread` and `min stop distance` off the Grid panel or
-`/api/status` while the backend is running, then pass them in.
+With your own numbers, still one line each:
+
+```powershell
+.\venv\Scripts\python.exe tools\grid_fit_report.py --spread 0.25 --broker-stop-level-points 0 --basket-stop 60 --daily-loss 100 --balance 1000 --floor 800
+.\venv\Scripts\python.exe tools\grid_fit_report.py --spread 0.25 --commission-per-lot-per-side 2.75 --slippage-points-per-fill 1 --basket-stop 60
+.\venv\Scripts\python.exe tools\grid_fit_report.py --alternatives --spread 0.25
+```
+
+It reads nothing, opens no terminal and cannot place an order. Every input is
+printed back with its provenance, so a FIXTURE value is never mistaken for your
+broker's.
+
+**Where the first level's distance comes from.** The report splits it three ways,
+because only one of the three is a broker rule:
+
+| Term | Whose | How it is obtained |
+| --- | --- | --- |
+| `trade_stops_level × point` | **the broker's** | `--broker-stop-level-points`, or read it off `/api/status` → `stop_distance.broker_stop_level_distance` |
+| `+ 5 points` | **this application's** | a buffer against rounding and price movement between calculating a stop and submitting it. Applied only when the broker declares a minimum |
+| `spread × 3` | **this application's** | a fallback for brokers that declare no minimum yet still reject a stop inside the live spread. **No broker states this rule** |
+
+The engine places the first level at `max(grid distance, max(broker + buffer,
+spread × 3))`. On gold at a 0.24 spread the third term wins — `0.72`, wider than
+the `0.30` grid distance — so an **application choice**, not a broker
+requirement, is what moves every level and inflates the estimate:
+
+| Effective first step | Where it came from | Estimate |
+| --- | --- | --- |
+| 0.30 | the grid distance (test fixture: the double reports no minimum at all) | **37.80** |
+| 0.72 | this app's spread × 3 at a 0.24 spread | **46.20** |
+| 1.05 | a broker declaring 100 points, plus this app's 5 | **52.80** |
+
+Read your live split while the backend is running, one line:
+
+```powershell
+(Invoke-RestMethod http://127.0.0.1:8000/api/status).stop_distance
+(Invoke-RestMethod http://127.0.0.1:8000/api/status).completed_grid_estimate
+```
+
+**What the estimate covers, and what it does not.** One scenario: every level
+filled, equal volume both sides, entry spread once per fill, valued as if closed
+back at the reference price. It is **not a maximum loss**. Closing costs are not
+in it — no exit spread, no commission, no swap, no slippage — and it says nothing
+about partial fills, unequal fills or one-directional exposure, which is not
+frozen and is bounded by the basket stop instead.
+
+**So a passing comparison is not budget compatibility.** Admission compares the
+entry-side estimate against a budget and nothing more; the remaining-budget
+figure it compares against excludes the exit reserve too. Neither side carries a
+closing-cost buffer. The report now says so, and where a closing cost has not
+been supplied it prints **UNKNOWN** rather than zero and refuses to total it.
+Supply your own figures with `--commission-per-lot-per-side` and
+`--slippage-points-per-fill` if you want them counted; nothing invents a fee, and
+swap stays unknown because it depends on nights held.
+
+**If the grid does not fit the limits you choose, the rejection stands.** Nothing
+here advises raising a limit or adding money to clear a gate. `--alternatives`
+prints smaller profiles as arithmetic for a decision you make later: untested,
+not active, and not known to be better — a smaller grid has a smaller adverse
+scenario *and* a smaller cash target.
+
+**These changes improve prevention and recovery. They do not make a limit
+absolute.** A gap, a rejected close, a terminal that stops answering, or movement
+between two protective cycles can still overshoot a trigger.
 
 ## B. Requires the MT5 terminal — you run these, not the development environment
 
 ### B1. Export ticks (reads history, cannot place an order)
 
-This is the **one thing worth doing next**, and it does not wait on any risk
-decision: the exporter imports nothing from the app, so no engine and no order
-path is reachable from it, and the only terminal calls it makes are
-`initialize`, `symbol_select`, `copy_ticks_range` and `shutdown`.
-`tests/test_export_ticks.py` asserts that offline against a fake MT5 module.
+**This is the next thing worth doing, and it waits on nothing.** It does not need
+your risk numbers: a read-only export cannot open a position. Verified offline —
+the tool imports nothing from `app`, so no engine and no order path is reachable
+from it, and the only terminal calls it makes are `initialize`, `symbol_select`,
+`copy_ticks_range`, `version` and `shutdown`. `tests/test_export_ticks.py`
+asserts that against a fake MT5 module (17 tests).
 
-It DOES need the MT5 terminal open and logged in, because only the terminal
-holds the history.
+It does need the MT5 terminal open and logged in, because only the terminal holds
+the history.
+
+**One command, one line. Copy it exactly:**
 
 ```powershell
-cd C:\Users\Home\Documents\basit-qureshi\backend
-New-Item -ItemType Directory -Force -Path data | Out-Null
-.\venv\Scripts\python.exe tools\export_ticks.py --symbol XAUUSDm ^
-    --from 2026-06-25 --to 2026-09-24 --out data\xauusdm_ticks.csv
+cd C:\Users\Home\Documents\basit-qureshi\backend; New-Item -ItemType Directory -Force -Path data | Out-Null; .\venv\Scripts\python.exe tools\export_ticks.py --symbol XAUUSDm --from 2026-06-25 --to 2026-09-24 --out data\xauusdm_ticks.csv
 ```
 
-If it stops part way (terminal restart, connection drop), continue it:
+If it stops part way — terminal restart, connection drop — continue it with the
+same line plus `--resume`:
 
 ```powershell
-.\venv\Scripts\python.exe tools\export_ticks.py --symbol XAUUSDm ^
-    --from 2026-06-25 --to 2026-09-24 --out data\xauusdm_ticks.csv --resume
+.\venv\Scripts\python.exe tools\export_ticks.py --symbol XAUUSDm --from 2026-06-25 --to 2026-09-24 --out data\xauusdm_ticks.csv --resume
 ```
 
-Real flags, as the file actually defines them: `--symbol`, `--from`, `--to`,
-`--out` (all required), plus `--chunk-days` (default 1), `--resume`,
-`--overwrite`, `--manifest`. There is no other flag.
-
-**Dates are INCLUSIVE UTC days.** `--to 2026-09-24` covers up to
-2026-09-24 23:59:59.999 UTC. Each day is a separate bounded request, so memory
-stays flat and a partial run can be resumed.
-
-**Read the manifest afterwards.** It lands at
-`data\xauusdm_ticks.csv.manifest.json` and a successful run is not proof of
-coverage:
+Then read the manifest, one line each:
 
 ```powershell
-Get-Content data\xauusdm_ticks.csv.manifest.json | ConvertFrom-Json |
-    Select-Object rows_total_in_file, rows_skipped_no_finite_two_sided_quote,
-                  rows_out_of_order, days_with_no_rows_expected_closed,
-                  coverage_is_complete
+(Get-Content data\xauusdm_ticks.csv.manifest.json | ConvertFrom-Json) | Select-Object rows_total_in_file, rows_skipped_no_finite_two_sided_quote, rows_out_of_order, days_with_no_rows_expected_closed, coverage_is_complete
 (Get-Content data\xauusdm_ticks.csv.manifest.json | ConvertFrom-Json).unexplained_gaps
 ```
 
-`unexplained_gaps` lists weekdays that came back empty. Saturdays and Sundays
-are classified as ordinary closures and are not flagged; a public holiday will
-appear as an unexplained gap, which is the safer direction to be wrong in.
-Nothing is ever interpolated — a gap is reported, never filled.
+That exact argv was run offline against a fake terminal over a Thursday–Monday
+range: five inclusive days, five bounded requests, 15 rows, the weekend
+classified as an ordinary closure, `unexplained_gaps` empty, manifest written to
+`data\xauusdm_ticks.csv.manifest.json`. The regression is
+`test_the_documented_single_line_command_works_end_to_end`.
 
-**What the file must contain:**
+**Real flags, as the file defines them:** `--symbol`, `--from`, `--to`, `--out`
+(required), then `--chunk-days` (default 1), `--resume`, `--overwrite`,
+`--manifest`. There is no other flag.
 
-- `time_utc,bid,ask` (plus `last,volume,flags,seq`)
-- **bid AND ask on every row** — a mid-only export cannot price a strategy that
-  pays the spread on up to 20 fills against a fixed cash target. Rows without a
-  finite two-sided quote are skipped and counted, never silently dropped
-- the **exact symbol the bot trades, including the broker suffix**
-- **tick resolution, not M1 bars** — bars cannot order intrabar events
+**Date boundaries.** Both dates are **inclusive UTC days**. `--to 2026-09-24`
+covers through 2026-09-24 23:59:59.999 UTC; internally the request runs to the
+start of the 25th. An earlier version treated `--to` as a midnight boundary, so
+the last day came back empty — that is fixed and tested. A reversed range is
+refused. Each day is a separate bounded request, so memory stays flat and a
+partial run resumes cleanly with a monotonic `seq`.
+
+**Manifest handling.** A successful run is **not** proof of coverage, so read
+these fields:
+
+| Field | What it means |
+| --- | --- |
+| `requested_range_utc` | what you asked for — unchanged by `--resume` |
+| `covered_this_run_utc` | what this run actually fetched, with `resumed: true/false` |
+| `rows_total_in_file` | rows in the CSV, across resumes |
+| `rows_skipped_no_finite_two_sided_quote` | rows with no finite bid **and** ask. Skipped and counted, never silently dropped |
+| `rows_out_of_order` | non-monotonic timestamps; a non-zero value means the file is not sorted |
+| `days_with_no_rows_expected_closed` | Saturdays and Sundays with no ticks — ordinary market closure |
+| `unexplained_gaps` | **weekdays** that came back empty. Non-empty means coverage is incomplete |
+| `coverage_is_complete` | false if there were errors or out-of-order rows |
+
+Weekend classification is coarse and deliberately errs toward alarm: a public
+holiday shows up as an unexplained gap. Nothing is ever interpolated — a gap is
+reported, never filled.
+
+**What the file must contain:** `time_utc,bid,ask` plus `last,volume,flags,seq`;
+**bid and ask on every row** (a mid-only export cannot price a strategy that pays
+the spread on up to 20 fills against a fixed cash target); the **exact symbol
+including the broker suffix**; **tick resolution, not M1 bars**. Two ticks sharing
+a millisecond are both kept, told apart by `seq`.
 
 **About the range.** Three months is a starting collection window, not a
-statistically sufficient sample, and nothing here assumes your broker keeps that
-much tick history. Export what exists, send the manifest with it, and the
-coverage decides what can be measured. If the history is short, the answer is
-prospective collection from now on, not a bigger claim from less data.
+statistically sufficient sample, and nothing here assumes your broker retains
+that much tick history. Export what exists, send the manifest with the CSV, and
+let the coverage decide what can be measured. If the history is short, the answer
+is prospective collection from now on — not a bigger claim from less data.
 
 ### B2. Start the backend (this does NOT start trading)
 
@@ -299,18 +374,21 @@ These are yours. They are not values to invent.
 > distance is itself derived from the live spread, so a wider spread pushes
 > every level further out:
 >
-> | spread | min stop distance | estimate |
-> | --- | --- | --- |
-> | 0.24 | 0.00 (fixture) | 37.80 |
-> | 0.25 | 0.75 | 47.00 |
-> | 0.30 | 0.90 | 51.00 |
-> | 0.50 | 1.50 | 67.00 |
+> | spread | effective first step | whose rule set it | estimate |
+> | --- | --- | --- | --- |
+> | 0.24 | 0.30 | the grid distance (fixture: the double declares no minimum) | 37.80 |
+> | 0.24 | 0.72 | **this app's** spread x 3 | 46.20 |
+> | 0.25 | 0.75 | **this app's** spread x 3 | 47.00 |
+> | 0.50 | 1.50 | **this app's** spread x 3 | 67.00 |
+> | 0.24 | 1.05 | a broker declaring 100 points, **plus this app's 5** | 52.80 |
+>
+> Only the first row is a pure broker/configuration outcome. In the others an
+> application choice is what moved the levels — see §A7 for the split.
 >
 > Get your own number offline, with no terminal and no risk (§A7):
 >
 > ```powershell
-> .\venv\Scripts\python.exe tools\grid_fit_report.py --assumptions ^
->     --spread 0.25 --min-stop-distance 0.75 --basket-stop 60 --daily-loss 100
+> .\venv\Scripts\python.exe tools\grid_fit_report.py --assumptions --spread 0.25 --basket-stop 60 --daily-loss 100
 > ```
 >
 > **What the estimate is and is not.** It is one scenario: every level filled,
