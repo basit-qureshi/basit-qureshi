@@ -185,3 +185,37 @@ no trained model, no owner risk numbers. The counts in §3 of this document are
 historical; the current suite is **341 backend tests**.
 
 Detail, probes and the owner-facing consequence: `DEMO_VALIDATION_STATUS.md` §7.
+
+---
+
+## 8. Amendment 2 — status split into five questions
+
+Section 7 amended three rows. A follow-up review then pointed out that the
+ledger's single IV/IU/M/F/B code conflates questions that have different
+answers, so those five are now separate. The full table is in
+`DEMO_VALIDATION_STATUS.md` §7.7; the summary:
+
+| Question | Answer across the whole project |
+| --- | --- |
+| **Implemented** | A, B, E, F yes. C: harness only. D: offline scaffold |
+| **Integrated into the live path** | A, B, F yes. C replay-only. **D not wired — pending** |
+| **Historical evidence** | **none** — no tick data exists |
+| **Connected verification** | **none** — no terminal has ever been contacted |
+| **Activation** | **none, and not authorized** |
+
+Two further corrections to what §7 and the audit report claimed:
+
+* the completed-grid figure is **not** a fixed ≈$37.80 and **not** a proven
+  maximum loss. It is an estimate of one named scenario, computed from the
+  adapter's own symbol specification; the fixture produces 37.80 and a 0.75
+  minimum stop distance produces 47.00. `DEMO_VALIDATION_STATUS.md` §7.3 has the
+  derivation, the exclusion table and the withdrawn claims.
+* row 20 ("AI shadow cannot mutate orders or configuration") was evidenced by a
+  grep over the engine source. A grep is a statement about a file. It is now
+  additionally evidenced by `tests/test_ai_shadow_integration.py`, which runs a
+  hostile fake inference component through the intended shadow path against a
+  live engine and compares actual order requests and configuration with a
+  control run. The row's real status is **offline scaffold, production wiring
+  pending**.
+
+Current suite: **388 backend tests**. §3's counts remain historical.

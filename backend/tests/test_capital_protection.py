@@ -294,10 +294,93 @@ def test_a_halted_engine_still_closes_exposure_that_appears_afterwards(broker, e
     e._tick()
     assert e._halt_reason is not None and broker.get_open_positions("XAUUSD", magic=MAGIC) == []
 
-    broker.open_position(OrderSide.BUY, 0.01, magic=MAGIC)   # the late fill
+    # A real entry price, not a placeholder: a position opened at 0.01 would
+    # carry an absurd mark and the test would pass for the wrong reason.
+    broker.open_position(OrderSide.BUY, broker.price, magic=MAGIC)   # the late fill
     assert broker.get_open_positions("XAUUSD", magic=MAGIC), "fixture: exposure must exist"
 
     e._protective_tick()
     assert broker.get_open_positions("XAUUSD", magic=MAGIC) == [], (
         "a halted engine left exposure it owns open at the broker"
+    )
+
+
+# --- D6b: the boundary of the budget comparison -------------------------------
+#
+# The rule is `estimate > remaining` refuses. Both sides of that boundary are
+# pinned, because a guard whose edge nobody tested is a guard that drifts.
+
+
+def remaining_for(engine, broker, target: float) -> float:
+    """Books a settled loss that leaves exactly `target` of the daily budget."""
+    from app.engine import grid_math
+
+    est = grid_math.completed_grid_estimate(
+        broker.get_current_price("XAUUSD"),
+        grid_math.GridSpec(buy_levels=engine.buy_stop_levels, sell_levels=engine.sell_stop_levels,
+                           lot=engine.lot_size, distance=engine.grid_distance),
+        grid_math.SymbolSpec.from_broker(broker.get_symbol_info("XAUUSD"))).total
+    settled_loss(engine, round(target - engine.max_daily_loss_usd, 2))
+    return est
+
+
+def test_an_estimate_exactly_equal_to_the_remaining_budget_is_allowed(broker, engine_factory):
+    e = engine_factory(basket_stop_loss_usd=60.0, max_daily_loss_usd=100.0)
+    e._protective_tick()
+    estimate = remaining_for(e, broker, 37.80)
+    assert estimate == 37.80, "fixture drifted; the boundary below is no longer the boundary"
+
+    allowed, reason = e._entry_gate(broker.get_account_info())
+    assert allowed is True, f"equal must fit, the rule refuses only when larger: {reason}"
+
+
+def test_one_cent_less_budget_than_the_estimate_is_refused(broker, engine_factory):
+    e = engine_factory(basket_stop_loss_usd=60.0, max_daily_loss_usd=100.0)
+    e._protective_tick()
+    remaining_for(e, broker, 37.79)
+
+    allowed, reason = e._entry_gate(broker.get_account_info())
+    assert allowed is False
+    assert "37.79" in reason and "37.80" in reason, reason
+
+
+def test_the_refusal_states_a_policy_rather_than_predicting_the_outcome(broker, engine_factory):
+    """A refused basket might have reached its target. The reason must not claim
+    otherwise — the ground is the declared policy, not a forecast."""
+    e = engine_factory(basket_stop_loss_usd=60.0, max_daily_loss_usd=100.0)
+    e._protective_tick()
+    remaining_for(e, broker, 15.0)
+    _, reason = e._entry_gate(broker.get_account_info())
+
+    assert "policy" in reason.lower()
+    for forecast in ("could only end", "will be liquidated", "only way"):
+        assert forecast not in reason.lower(), f"the refusal predicts the future: {reason}"
+    assert "excludes exit costs" in reason, "the refusal must not imply a maximum loss"
+
+
+def test_protection_over_preexisting_exposure_needs_no_admission(broker, engine_factory):
+    """Constructed directly, because admission would refuse to create this state.
+
+    The engine has to protect exposure it owns whether or not today's admission
+    policy would have allowed it: settings change, and a basket opened under an
+    earlier configuration is still the bot's to manage.
+    """
+    from app.brokers.base import OrderSide
+
+    # A daily budget far too small for this grid — admission would never place it.
+    e = engine_factory(basket_take_profit_usd=1000.0, basket_stop_loss_usd=25.0,
+                       max_daily_loss_usd=5.0)
+    e._protective_tick()                       # bind the account and the day
+    for _ in range(3):
+        broker.open_position(OrderSide.BUY, broker.price, magic=MAGIC)
+    assert e._entry_gate(broker.get_account_info())[0] is False, (
+        "fixture: this configuration must be one admission refuses"
+    )
+
+    broker.price -= 20.0                       # the owned exposure goes under water
+    e._protective_tick()
+
+    assert e._halt_reason is not None, "owned exposure was not protected"
+    assert broker.get_open_positions("XAUUSD", magic=MAGIC) == [], (
+        "the engine refused to manage exposure it already owned"
     )

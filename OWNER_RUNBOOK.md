@@ -50,7 +50,7 @@ cd C:\Users\Home\Documents\basit-qureshi\backend
 .\venv\Scripts\python.exe -m pip install -r requirements.txt -r requirements-mt5.txt
 .\venv\Scripts\python.exe -m pytest -q
 ```
-Expect **341 passed**. Anything else, stop and send the output.
+Expect **388 passed**. Anything else, stop and send the output.
 
 ```powershell
 cd C:\Users\Home\Documents\basit-qureshi\frontend
@@ -116,25 +116,87 @@ Copy-Item backend\trading_bot.bak.db        backend\trading_bot.db        -Force
 
 ---
 
-## B. Requires the MT5 terminal — you run these, not the development environment
-
-### B1. Export ticks (reads history, places no orders)
+### A7. Your own completed-grid number — offline, no terminal, no risk
 
 ```powershell
 cd C:\Users\Home\Documents\basit-qureshi\backend
-.\venv\Scripts\python.exe tools\export_ticks.py --symbol XAUUSDm `
-    --from 2026-06-01 --to 2026-09-20 --out data\xauusdm_ticks.csv
+.\venv\Scripts\python.exe tools\grid_fit_report.py --assumptions
+.\venv\Scripts\python.exe tools\grid_fit_report.py --alternatives ^
+    --spread 0.25 --min-stop-distance 0.75 ^
+    --basket-stop 60 --daily-loss 100 --balance 1000 --floor 800
 ```
 
-**Smallest sufficient request** — this one file unblocks Phase C selection and
-Phase D training:
+Reads nothing, opens no terminal, cannot place an order. Every input is printed
+back with its provenance, so a FIXTURE value is never mistaken for your
+broker's. Read your live `spread` and `min stop distance` off the Grid panel or
+`/api/status` while the backend is running, then pass them in.
 
-- columns `time_utc,bid,ask` (optional `last,volume,flags`)
+## B. Requires the MT5 terminal — you run these, not the development environment
+
+### B1. Export ticks (reads history, cannot place an order)
+
+This is the **one thing worth doing next**, and it does not wait on any risk
+decision: the exporter imports nothing from the app, so no engine and no order
+path is reachable from it, and the only terminal calls it makes are
+`initialize`, `symbol_select`, `copy_ticks_range` and `shutdown`.
+`tests/test_export_ticks.py` asserts that offline against a fake MT5 module.
+
+It DOES need the MT5 terminal open and logged in, because only the terminal
+holds the history.
+
+```powershell
+cd C:\Users\Home\Documents\basit-qureshi\backend
+New-Item -ItemType Directory -Force -Path data | Out-Null
+.\venv\Scripts\python.exe tools\export_ticks.py --symbol XAUUSDm ^
+    --from 2026-06-25 --to 2026-09-24 --out data\xauusdm_ticks.csv
+```
+
+If it stops part way (terminal restart, connection drop), continue it:
+
+```powershell
+.\venv\Scripts\python.exe tools\export_ticks.py --symbol XAUUSDm ^
+    --from 2026-06-25 --to 2026-09-24 --out data\xauusdm_ticks.csv --resume
+```
+
+Real flags, as the file actually defines them: `--symbol`, `--from`, `--to`,
+`--out` (all required), plus `--chunk-days` (default 1), `--resume`,
+`--overwrite`, `--manifest`. There is no other flag.
+
+**Dates are INCLUSIVE UTC days.** `--to 2026-09-24` covers up to
+2026-09-24 23:59:59.999 UTC. Each day is a separate bounded request, so memory
+stays flat and a partial run can be resumed.
+
+**Read the manifest afterwards.** It lands at
+`data\xauusdm_ticks.csv.manifest.json` and a successful run is not proof of
+coverage:
+
+```powershell
+Get-Content data\xauusdm_ticks.csv.manifest.json | ConvertFrom-Json |
+    Select-Object rows_total_in_file, rows_skipped_no_finite_two_sided_quote,
+                  rows_out_of_order, days_with_no_rows_expected_closed,
+                  coverage_is_complete
+(Get-Content data\xauusdm_ticks.csv.manifest.json | ConvertFrom-Json).unexplained_gaps
+```
+
+`unexplained_gaps` lists weekdays that came back empty. Saturdays and Sundays
+are classified as ordinary closures and are not flagged; a public holiday will
+appear as an unexplained gap, which is the safer direction to be wrong in.
+Nothing is ever interpolated — a gap is reported, never filled.
+
+**What the file must contain:**
+
+- `time_utc,bid,ask` (plus `last,volume,flags,seq`)
 - **bid AND ask on every row** — a mid-only export cannot price a strategy that
-  pays the spread on up to 20 fills against a fixed cash target
+  pays the spread on up to 20 fills against a fixed cash target. Rows without a
+  finite two-sided quote are skipped and counted, never silently dropped
 - the **exact symbol the bot trades, including the broker suffix**
 - **tick resolution, not M1 bars** — bars cannot order intrabar events
-- **at least 3 months continuous**
+
+**About the range.** Three months is a starting collection window, not a
+statistically sufficient sample, and nothing here assumes your broker keeps that
+much tick history. Export what exists, send the manifest with it, and the
+coverage decides what can be measured. If the history is short, the answer is
+prospective collection from now on, not a bigger claim from less data.
 
 ### B2. Start the backend (this does NOT start trading)
 
@@ -216,6 +278,86 @@ Record the session while you do this — §F.
 
 ---
 
+## E. Decisions needed before any forward evaluation can start
+
+These are yours. They are not values to invent.
+
+| Decision | Currently | Note |
+| --- | --- | --- |
+| `GRID_BASKET_STOP_LOSS_USD` | 0 | Must exceed the completed-grid estimate for your symbol and settings, or admission refuses with a stated reason. Account currency, not necessarily USD |
+| `GRID_MAX_DAILY_LOSS_USD` | 100 | Judged on the **marked** daily result, floating loss included. What is LEFT of it must cover the same estimate — see below |
+| `GRID_CAPITAL_FLOOR_USD` | **0 — blocks all new entries** | The balance below which no new grid is placed. Balance minus the estimate must stay above it |
+| Broker-side SL | absent | The unresolved conflict: original spec asked for it, locked strategy forbids per-trade SL/TP |
+
+> **All three numbers are measured against the same completed-grid estimate,
+> and that estimate is NOT a fixed dollar figure.** It is computed at admission
+> from your broker's own spread, minimum stop distance, point size and point
+> value, together with your levels, lot and spacing. The **$37.80** quoted in
+> earlier reports is what *this project's test fixture* produces (price 4000,
+> spread 0.24, zero minimum stop distance, 1.00 per point per lot). Your
+> terminal will produce a different number, and on MT5 the minimum stop
+> distance is itself derived from the live spread, so a wider spread pushes
+> every level further out:
+>
+> | spread | min stop distance | estimate |
+> | --- | --- | --- |
+> | 0.24 | 0.00 (fixture) | 37.80 |
+> | 0.25 | 0.75 | 47.00 |
+> | 0.30 | 0.90 | 51.00 |
+> | 0.50 | 1.50 | 67.00 |
+>
+> Get your own number offline, with no terminal and no risk (§A7):
+>
+> ```powershell
+> .\venv\Scripts\python.exe tools\grid_fit_report.py --assumptions ^
+>     --spread 0.25 --min-stop-distance 0.75 --basket-stop 60 --daily-loss 100
+> ```
+>
+> **What the estimate is and is not.** It is one scenario: every level filled,
+> equal volume both sides, valued as if closed back at the reference price,
+> entry spread paid once per fill. It is **not a maximum loss** — it excludes
+> the exit spread, commission, swap and slippage, and it does not describe
+> partial fills, unequal fills or one-directional exposure, which is not frozen
+> and is bounded by the basket stop instead.
+>
+> **What the refusal means.** Admission refuses a grid whose estimate for that
+> scenario exceeds the budget that would have to absorb it. That is a declared
+> policy about what may be opened. It is **not** a prediction that the basket
+> would have lost: a basket refused on those grounds might well have reached its
+> target. If the estimate does not fit the limits you choose, the rejection
+> stands — the answer is not to raise your tolerated loss or add money to clear
+> a gate. A smaller grid profile is arithmetic you can inspect with
+> `--alternatives`, untested and not active, for a decision you make later.
+>
+> **These changes improve prevention and recovery. They do not make a limit
+> absolute.** A gap, a rejected close, a terminal that stops answering, or
+> movement between two protective cycles can still overshoot a trigger.
+
+### Forward evaluation plan — fixed before any results arrive
+
+- **Frozen profile:** `baseline@v1`, unchanged. No research profile is live.
+- **Costs:** your broker's actual commission and swap, recorded before the run
+  and not adjusted afterwards.
+- **Eligible sessions:** whatever `GRID_TRADING_START_HOUR`/`END_HOUR` you set,
+  fixed in advance.
+- **Minimum observations:** decided by the uncertainty you need, not by a
+  calendar. With losses that can exceed wins, a handful of baskets cannot
+  separate skill from variance. **State the effect size worth detecting and the
+  count follows from it** — I am not going to name a number of days and call it
+  proof.
+- **Data quality:** the run is void if the terminal was disconnected for a
+  material part of it, or if the exposure panel showed "unknown" during a
+  breach.
+- **Stop conditions:** stop if the capital floor is reached, if a halt does not
+  clear correctly, if exposure appears that the bot does not own, or if the
+  panel and MT5 disagree.
+- **Separation:** AI shadow observations and replay outcomes are **simulated**
+  and never counted with executed demo trades. Demo results are **not** live
+  evidence. There is no automatic promotion to real trading, no automatic
+  retraining, and no risk increase after a loss.
+
+---
+
 ## F. Recording a session and exporting the evidence
 
 A **recording** is not a trading session. Starting one writes files; it places
@@ -246,7 +388,7 @@ Check, and do not start if any line fails:
 | Ownership scope | `/api/open-trades` shows only orders with your magic number; anything you opened by hand is absent |
 | Current exposure | you know what is open **before** you start, or you start flat |
 | Risk budgets | `capital_floor_usd`, `basket_stop_loss_usd`, `max_daily_loss_usd` are your saved numbers, not zeros (§E) |
-| Basket stop sanity | it exceeds ≈ $37.80, or admission will refuse every grid and say so |
+| Basket stop sanity | it exceeds the completed-grid estimate for YOUR symbol (§A7 prints it), or admission refuses every grid and says so |
 | Margin | `day_risk` is complete and `entry_block_reason` is not a margin or unknown block |
 | Halt state | `halted` is `null`. A halt that survived a restart is **not** noise — find out what caused it first |
 | AI | `mode` = `disabled`. A model has never been trained; there is nothing to enable |
@@ -337,57 +479,3 @@ separates nothing from variance. Read `close_intents_unconfirmed`,
 places evidences less than it looks like it does.
 
 ---
-
-## E. Decisions needed before any forward evaluation can start
-
-These are yours. They are not values to invent.
-
-| Decision | Currently | Note |
-| --- | --- | --- |
-| `GRID_BASKET_STOP_LOSS_USD` | 0 | Must exceed the completed-grid scenario (≈ $37.80 at 10+10 / 0.01 / 0.30) or admission refuses with a stated reason |
-| `GRID_MAX_DAILY_LOSS_USD` | 100 | Judged on the **marked** daily result, floating loss included. Must **also** exceed ≈ $37.80 — see below |
-| `GRID_CAPITAL_FLOOR_USD` | **0 — blocks all new entries** | The balance the account must never be traded down past. The balance minus ≈ $37.80 must stay above it |
-| Broker-side SL | absent | The unresolved conflict: original spec asked for it, locked strategy forbids per-trade SL/TP |
-
-> **All three numbers are now measured against the same ≈ $37.80.** That figure
-> is what a fully filled 10+10 grid at 0.01 lots and 0.30 spacing locks in once
-> both sides fill: the basket stops responding to price and no recovery undoes
-> it. A budget smaller than that cannot be honoured, because a fast oscillation
-> can fill both sides between two protective cycles and land there before
-> anything can fire. Admission refuses such a grid and says so rather than
-> placing a basket whose only possible ending is a forced liquidation.
->
-> The practical consequence, worst case where every basket freezes:
->
-> | `GRID_MAX_DAILY_LOSS_USD` | baskets the day can hold |
-> | --- | --- |
-> | 40 | 1 |
-> | 100 | 2 |
-> | 150 | 3 |
-> | 200 | 5 |
->
-> That is a floor on the day, not a plan for it. Most baskets do not freeze —
-> but the ones that do cost this much, and the budget has to be able to pay.
-
-### Forward evaluation plan — fixed before any results arrive
-
-- **Frozen profile:** `baseline@v1`, unchanged. No research profile is live.
-- **Costs:** your broker's actual commission and swap, recorded before the run
-  and not adjusted afterwards.
-- **Eligible sessions:** whatever `GRID_TRADING_START_HOUR`/`END_HOUR` you set,
-  fixed in advance.
-- **Minimum observations:** decided by the uncertainty you need, not by a
-  calendar. With losses that can exceed wins, a handful of baskets cannot
-  separate skill from variance. **State the effect size worth detecting and the
-  count follows from it** — I am not going to name a number of days and call it
-  proof.
-- **Data quality:** the run is void if the terminal was disconnected for a
-  material part of it, or if the exposure panel showed "unknown" during a
-  breach.
-- **Stop conditions:** stop if the capital floor is reached, if a halt does not
-  clear correctly, if exposure appears that the bot does not own, or if the
-  panel and MT5 disagree.
-- **Separation:** AI shadow observations and replay outcomes are **simulated**
-  and never counted with executed demo trades. Demo results are **not** live
-  evidence. There is no automatic promotion to real trading, no automatic
-  retraining, and no risk increase after a loss.

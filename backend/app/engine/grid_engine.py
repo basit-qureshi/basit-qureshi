@@ -56,6 +56,7 @@ from app.engine.instrumentation import (
     monotonic_ms,
     new_correlation_id,
 )
+from app.engine import grid_math
 from app.engine.risk_accounting import build_day_risk
 from app.evidence import session as evidence_session
 
@@ -688,13 +689,14 @@ class GridEngine:
         info = self.broker.get_symbol_info(self.symbol)
         # Stop orders have to clear the broker's minimum distance from the
         # market or the order is rejected outright, so the first level starts at
-        # whichever is further: one grid step, or that minimum.
-        first_step = max(self.grid_distance, info.min_stop_distance)
+        # whichever is further: one grid step, or that minimum. The levels come
+        # from the SAME function the admission estimate uses — two copies of this
+        # arithmetic would let the gate measure a grid the engine does not place.
+        buy_targets, sell_targets = self._grid_levels(price, info)
         self._reference_price = price
         placed_buy = placed_sell = 0
 
-        for level in range(self.buy_stop_levels):
-            target = price + first_step + level * self.grid_distance
+        for target in buy_targets:
             try:
                 self.broker.place_pending_order(
                     self.symbol, PendingType.BUY_STOP, self.lot_size, target, "BUY GRID", self.magic_number
@@ -703,8 +705,7 @@ class GridEngine:
             except Exception:
                 logger.exception("could not place BUY STOP at %.2f", target)
 
-        for level in range(self.sell_stop_levels):
-            target = price - first_step - level * self.grid_distance
+        for target in sell_targets:
             try:
                 self.broker.place_pending_order(
                     self.symbol, PendingType.SELL_STOP, self.lot_size, target, "SELL GRID", self.magic_number
@@ -1337,35 +1338,57 @@ class GridEngine:
         """The exact prices _build_grid would use. Shared so the affordability
         check measures the grid that would really be placed, not an idealised
         one."""
-        first_step = max(self.grid_distance, info.min_stop_distance)
-        buys = [price + first_step + i * self.grid_distance for i in range(self.buy_stop_levels)]
-        sells = [price - first_step - i * self.grid_distance for i in range(self.sell_stop_levels)]
-        return buys, sells
+        return grid_math.grid_levels(
+            price,
+            grid_math.GridSpec(buy_levels=self.buy_stop_levels,
+                               sell_levels=self.sell_stop_levels,
+                               lot=self.lot_size, distance=self.grid_distance),
+            grid_math.SymbolSpec.from_broker(info),
+        )
 
     def _completed_grid_loss(self, price: float, info) -> float:
-        """The loss a fully filled grid is already showing, as a positive number.
+        """Marked loss of ONE named scenario, as a positive number in account currency.
 
-        Once both sides have filled, the buy and sell volumes cancel and the
-        basket's profit stops responding to price at all: it is frozen at the
-        sell entries minus the buy entries, less the spread paid to open every
-        one of them. That number is always a loss, and no price recovers it.
+        The scenario: every configured level fills at exactly its own price, the
+        two sides end up with equal volume, and the basket is valued as if closed
+        back at the reference price, having paid the entry spread once per fill.
+        In that state the volumes cancel, the basket stops responding to price,
+        and no later move recovers it.
 
-        If it is larger than the basket stop, the configured grid cannot finish
-        building without breaching the configured budget. That is a contradiction
-        in the settings, not bad luck, and it is checkable before trading.
+        **This is an estimate of that scenario, not a maximum loss.** What it
+        leaves out, all of which can make a real outcome worse:
+
+        - the exit: no closing spread, no commission, no slippage reserve
+        - commission and swap, which are not modelled here at all
+        - partial or unequal fills, and one-directional exposure, which is not
+          frozen and is bounded by the basket stop rather than by this figure
+        - a cancellation race, a rejected close, or a gap during liquidation
+        - `min_stop_distance` and `spread` moving after admission; both are read
+          once, at admission, and both feed this number
+        - conversion drift when the symbol is not quoted in account currency:
+          `pip_value_per_lot` is the broker's snapshot at this moment
+
+        Every input is named in `tools/grid_fit_report.py`, which prints the
+        same arithmetic offline for stated symbol parameters. Nothing here is
+        hardcoded per symbol or currency: `pip_size`, `pip_value_per_lot`,
+        `spread` and `min_stop_distance` all come from the adapter, and
+        `pip_value_per_lot` is documented as account currency per pip per lot.
+
+        Used by admission as a declared policy: a grid whose estimate for this
+        scenario does not fit a stated budget is refused. That is a policy about
+        what may be opened, not a prediction that the scenario will happen.
         """
-        buys, sells = self._grid_levels(price, info)
-        if not info.pip_size:
-            return 0.0
-        per_point, point = info.pip_value_per_lot, info.pip_size
-        spread_points = info.spread / point
-        frozen = 0.0
-        for level in buys:  # a buy filled above the reference, closed back at it
-            frozen += (level - price) / point * self.lot_size * per_point
-        for level in sells:
-            frozen += (price - level) / point * self.lot_size * per_point
-        spread_cost = spread_points * self.lot_size * per_point * (len(buys) + len(sells))
-        return round(frozen + spread_cost, 2)
+        return self._completed_grid_estimate(price, info).total
+
+    def _completed_grid_estimate(self, price: float, info):
+        """The same figure with its components, for the gate and the report."""
+        return grid_math.completed_grid_estimate(
+            price,
+            grid_math.GridSpec(buy_levels=self.buy_stop_levels,
+                               sell_levels=self.sell_stop_levels,
+                               lot=self.lot_size, distance=self.grid_distance),
+            grid_math.SymbolSpec.from_broker(info),
+        )
 
     def _affordability(self, account, risk=None) -> tuple[bool, str | None]:
         try:
@@ -1411,37 +1434,52 @@ class GridEngine:
                 f"building without breaching it."
             )
 
-        # 2b. The same argument, against what is LEFT of today's loss budget
-        #     and against the capital floor. Check 2 asks whether the grid can
-        #     finish building inside the basket budget; these ask whether it
-        #     can finish building inside the two other limits the owner already
-        #     set. No number here is invented: `frozen` is this engine's own
-        #     calculation and the budgets are the owner's own settings.
+        # 2b. The same comparison against the two other budgets the owner set.
+        #     Check 2 asks whether the completed-grid estimate fits the basket
+        #     budget; these ask whether it fits what is left of the day's budget
+        #     and the headroom above the capital floor.
         #
-        #     Why it matters: a basket that cannot finish inside the remaining
-        #     daily allowance has only one way to end — the daily limit firing
-        #     and liquidating it. The limit does bound the loss, so this is not
-        #     an uncontrolled drawdown; it is a basket opened in the knowledge
-        #     that a forced liquidation is its only outcome, plus the exit cost
-        #     and whatever the mark moves between two protective cycles.
+        #     This is a DECLARED ADMISSION POLICY, not a prediction. A basket
+        #     admitted with less headroom than the estimate may well reach its
+        #     profit target and never approach the scenario at all. The policy
+        #     says: do not open a basket whose named adverse scenario is larger
+        #     than the budget that would have to absorb it. The reason for the
+        #     refusal is the policy, not certainty about the outcome.
+        #
+        #     Boundaries, stated so nothing is counted twice:
+        #     - `_consider_entry` only reaches admission with ZERO open
+        #       positions, ZERO resting orders and ZERO unsettled closes for
+        #       this account/symbol/magic, so `frozen` is the whole of the new
+        #       exposure and `marked_result` carries none of it.
+        #     - `marked_result` is the day's settled result plus the open-mark
+        #       change plus anything awaiting settlement. It deliberately
+        #       EXCLUDES the exit reserve (that is `risk_reading`), and `frozen`
+        #       excludes exit costs too, so neither side of the comparison
+        #       carries a closing-cost buffer. Both are entry-side figures.
+        #     - units are account currency on both sides: the budgets are the
+        #       owner's settings (named `_usd`, but whatever the account is
+        #       denominated in) and `frozen` comes from the adapter's
+        #       `pip_value_per_lot`, documented as account currency.
         if self.max_daily_loss_usd > 0:
             day = risk if risk is not None else self._day_risk()
             remaining = round(self.max_daily_loss_usd + day.marked_result, 2)
             if frozen > remaining:
                 return False, (
-                    f"NO_TRADE: a fully filled grid locks in about ${frozen:.2f}, but only "
-                    f"${remaining:.2f} of today's ${self.max_daily_loss_usd:.2f} loss budget is left "
-                    f"(marked {day.marked_result:.2f}). The basket could only end by forcing the daily "
-                    f"limit to liquidate it. No new grid today unless the budget or the grid changes."
+                    f"NO_TRADE: the completed-grid estimate for this configuration is {frozen:.2f}, "
+                    f"and {remaining:.2f} of today's {self.max_daily_loss_usd:.2f} loss budget is left "
+                    f"(marked {day.marked_result:.2f}). Admission policy refuses a grid whose "
+                    f"completed-grid estimate exceeds the budget that would have to absorb it. The "
+                    f"estimate covers the fully filled equal-volume case and excludes exit costs, "
+                    f"commission, swap and slippage."
                 )
 
         floor_headroom = round(balance - self.capital_floor_usd, 2)
         if frozen > floor_headroom:
             return False, (
-                f"NO_TRADE: a fully filled grid locks in about ${frozen:.2f}, which would take the "
-                f"${balance:.2f} balance to or past the ${self.capital_floor_usd:.2f} capital floor "
-                f"(${floor_headroom:.2f} of headroom). The floor is the line this account is not traded "
-                f"down past, so the grid is not placed."
+                f"NO_TRADE: the completed-grid estimate for this configuration is {frozen:.2f}, and "
+                f"the {balance:.2f} balance has {floor_headroom:.2f} of headroom above the "
+                f"{self.capital_floor_usd:.2f} capital floor. Admission policy refuses a grid whose "
+                f"completed-grid estimate exceeds that headroom."
             )
 
         # 3. The broker's own volume rules.

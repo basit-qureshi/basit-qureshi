@@ -162,12 +162,24 @@ def main():
     print(json.dumps(plan.as_dict(), indent=2))
 
     log = ExperimentLog(budget=6)     # declared BEFORE any result is looked at
+    costs = replay().costs
+    print("\n--- COST ASSUMPTIONS, identical for every profile below ---")
+    print(f"  commission      : {costs.commission_per_lot_per_side} per lot per side "
+          f"(charged on entry and exit, already inside every figure)")
+    print(f"  swap            : {costs.swap_per_lot_per_day} per lot per day "
+          f"({'NOT MODELLED' if not costs.swap_per_lot_per_day else 'modelled'})")
+    print(f"  slippage        : {costs.slippage} price units beyond the quoted side")
+    print(f"  decision latency: {costs.decision_latency}")
+    print("  spread          : paid through the quoted side — a fill takes ask for a")
+    print("                    BUY and bid for a SELL, and marking closes at the")
+    print("                    other side, so entry AND exit spread are included")
+
     print("\n--- CANDIDATES on the synthetic fixture (MECHANICS ONLY) ---")
-    # `open` and `open marked` are shown because a profile that completes no
-    # basket and leaves one open at -24.58 is NOT a flat 0.00 result, and a
-    # table that showed only completed baskets would say exactly that.
-    header = (f"{'profile':<32}{'done':>6}{'net':>9}{'open':>6}"
-              f"{'open mkd':>10}{'blocked':>9}{'worst':>9}")
+    # Realised and open are printed as separate columns, and then added, because
+    # a profile that completes no basket and leaves one open at -24.58 is not a
+    # flat 0.00 result — and a realised figure alone says exactly that.
+    header = (f"{'profile':<30}{'done':>5}{'realised':>10}{'open':>5}"
+              f"{'open mkd':>10}{'TOTAL mkd':>11}{'comm':>8}{'blocked':>8}{'worst':>9}")
     print(header)
     print("-" * len(header))
 
@@ -179,15 +191,29 @@ def main():
                               warmup_ticks=300)
         s = report.summary()
         log.record(profile.key, profile.as_dict().get("trailing") or {}, "synthetic", s)
-        per = s["result_per_basket"] if s["result_per_basket"] is not None else 0.0
-        print(f"{profile.name:<32}{s['baskets_completed']:>6}{s['net_result']:>9.2f}"
-              f"{s['baskets_still_open']:>6}{s['remaining_exposure_marked']:>10.2f}"
-              f"{s['admissions_blocked']:>9}{s['worst_basket_marked']:>9.2f}")
+        # `net_result` sums CLOSED baskets only; `remaining_exposure_marked` is
+        # what is still open. The two sets are disjoint, so adding them is the
+        # whole picture and double-counts nothing.
+        total_marked = round(s["net_result"] + s["remaining_exposure_marked"], 2)
+        print(f"{profile.name:<30}{s['baskets_completed']:>5}{s['net_result']:>10.2f}"
+              f"{s['baskets_still_open']:>5}{s['remaining_exposure_marked']:>10.2f}"
+              f"{total_marked:>11.2f}{s['commission_paid']:>8.2f}"
+              f"{s['admissions_blocked']:>8}{s['worst_basket_marked']:>9.2f}")
 
-    print("\n  done = baskets that reached an exit.  open = still open at the end,")
-    print("  marked at the last observed tick rather than dropped.  A profile with")
-    print("  done=0 and net=0.00 has NOT broken even — read its open marked column.")
-    print("  One basket is one observation. These counts cannot support a selection.")
+    print("\n  Column definitions, because 'net' on its own is ambiguous:")
+    print("    done      = baskets that reached an exit")
+    print("    realised  = sum over CLOSED baskets only, commission included")
+    print("                (this is the field the summary calls `net_result`)")
+    print("    open      = baskets still open at the end of the fixture")
+    print("    open mkd  = those baskets marked at the last observed tick,")
+    print("                commission included, never dropped")
+    print("    TOTAL mkd = realised + open mkd. The two sets are disjoint;")
+    print("                nothing is counted twice")
+    print("    worst     = worst marked value any basket passed through")
+    print("\n  A profile with done=0 and realised=0.00 has NOT broken even.")
+    print("  Compare profiles on TOTAL mkd, never on realised alone.")
+    print("  One basket is one observation. These counts cannot support a")
+    print("  selection, and a smaller loss on one synthetic fixture is not an edge.")
 
     print("\n--- EXPERIMENT LOG ---")
     state = log.as_dict()

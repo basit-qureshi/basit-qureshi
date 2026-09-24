@@ -5,14 +5,16 @@ Branch `claude/forex-ai-trading-bot-izgn6l`. Source revision: `6771366`
 **Nothing has been pushed; `origin` is still at `1116af1`.** No terminal was
 connected, no order was placed, no session was recorded on a real account.
 
-§7 holds the A–F audit: what it re-checked against the code rather than
-against the phase reports, and the two protection defects it found.
+§7 holds the A–F audit and the corrections that followed it: §7.3 withdraws
+three claims the earlier report made about the risk figure, §7.5 corrects the
+performance and phase labels, §7.7 splits status into implementation,
+integration, evidence, connected verification and activation.
 
 ## The four questions, answered separately
 
 | Question | Answer |
 | --- | --- |
-| Do the **offline checks** pass? | **Yes.** 341 backend tests, 4 frontend tests, lint clean, build clean, and a fixture dry-run that records a full session and exports it. |
+| Do the **offline checks** pass? | **Yes.** 388 backend tests, 4 frontend tests, lint clean, build clean, and a fixture dry-run that records a full session and exports it. Offline, against fake brokers — see §7.8 for what that does and does not establish. |
 | Is a **demo session ready to run**? | **Prepared, not authorized to start.** The collector, the export and the procedure exist. It is blocked on three owner risk numbers (`OWNER_RUNBOOK.md` §E). |
 | Has an **actual session occurred**? | **No.** Zero sessions recorded. Zero demo trades. Zero live trades. |
 | Is **profitability supported**? | **No. Trading performance is not measured.** There is no market data and no session data, so there is nothing to measure it from. |
@@ -81,7 +83,7 @@ Linux container, Python 3.11. No MT5, no Windows, no terminal, no network
 provider, no credentials read.
 
 ```
-cd backend  && python3 -m pytest -q                        -> 341 passed
+cd backend  && python3 -m pytest -q                        -> 388 passed
 cd backend  && python3 -m compileall -q app tools          -> OK
 cd backend  && python3 -m tests.bench.collector_dryrun     -> rc 0
 cd frontend && npm test                                    -> 4 passed
@@ -107,7 +109,7 @@ collector works. They establish nothing about gold, this strategy, or money.
 
 | Class | Present |
 | --- | --- |
-| Synthetic contract tests | **yes** — 341 backend, 4 frontend |
+| Synthetic contract tests | **yes** — 388 backend, 4 frontend |
 | Fixture collector dry-run | **yes** — one, reproducible |
 | Historical replay on real ticks | **no** — no dataset exists |
 | Recorded demo session | **no** — none has been run |
@@ -201,41 +203,220 @@ about the code. Two defects survived into this pass; both are fixed below.
 
 | # | Defect | Evidence | Fix |
 | --- | --- | --- | --- |
-| 1 | **A grid was admitted that could not fit inside the owner's remaining daily budget or the capital floor.** Admission already refused a grid whose completed-grid freeze exceeded the *basket* budget; the same sentence was true of the other two limits and nothing checked them. Probe: with $15 of a $100 daily budget left, a grid that freezes at **$37.80** was admitted. Its only possible ending was the daily limit liquidating it — and a fast oscillation filling both sides between two protective cycles lands there before any tick can fire, so the limit could be overshot by 2.5× | `_affordability`, `app/engine/grid_engine.py:1407` | Refuse when the known freeze exceeds the remaining daily allowance, or the balance-minus-floor headroom. Both numbers are the owner's own settings; nothing is invented. `test_a_grid_that_cannot_fit_the_remaining_daily_budget_is_refused`, `test_a_grid_that_would_break_the_capital_floor_is_refused`, plus `test_the_same_grid_is_allowed_while_the_budget_can_absorb_it` so the guard cannot simply block everything |
+| 1 | **A grid was admitted whose completed-grid estimate exceeded the remaining daily budget or the capital-floor headroom.** Admission already applied that comparison to the *basket* budget and to nothing else. Probe: with $15 left of a $100 daily budget, a grid whose completed-grid estimate was $37.80 (fixture inputs) was admitted | `_affordability`, `app/engine/grid_engine.py` | Refuse when the estimate exceeds the remaining daily allowance or the balance-minus-floor headroom. Both budgets are the owner's own settings and the estimate is the engine's own calculation; nothing is invented. `test_a_grid_that_cannot_fit_the_remaining_daily_budget_is_refused`, `test_a_grid_that_would_break_the_capital_floor_is_refused`, boundary tests either side of the comparison, and `test_the_same_grid_is_allowed_while_the_budget_can_absorb_it` so the guard cannot simply block everything |
 | 2 | **A halted engine ignored exposure that appeared after its own close confirmed.** Only the profit path retired a finished close intent, so after a stop or a risk halt a DONE intent stayed attached for good — and `_check_risk_limits` re-opens a close for live exposure **only when no intent is attached**. Probe: halted, one position open at the broker with the bot's own magic number, one protective tick, **position still open** | `_drive_close_intent`, `app/engine/grid_engine.py:838` | The intent is retired where it completes, so every cause behaves like the profit path. `test_a_completed_close_releases_its_intent`, `test_a_halted_engine_still_closes_exposure_that_appears_afterwards` |
 
-### 7.3 What fix 1 changes for the owner
+### 7.3 Correction to the previous report's risk claim
 
-The three risk numbers are now all measured against the **≈ $37.80** a
-completed 10+10 grid at 0.01 lots / 0.30 spacing locks in. A daily loss limit
-smaller than that is a configuration the machine cannot honour, and admission
-now says so instead of placing a basket and liquidating it. `OWNER_RUNBOOK.md`
-§E carries the table: a $100 daily limit holds **2** frozen baskets, $150 holds
-3, $200 holds 5.
+The previous report said every budget "must exceed approximately $37.80". That
+sentence was wrong in three ways, and this section replaces it.
 
-Six existing tests used deliberately tiny daily limits ($5, $15) to make the
-limit fire quickly. Those configurations are now refused before a grid exists,
-so each was re-pointed at a limit the configuration can honour ($40) while
-testing exactly what it tested before. One Phase B assertion changed from "an
-intent is still attached" to "the basket was counted and entries latched",
-because a confirmed close now releases its intent.
+**It is not a universal figure.** `$37.80` is what *this project's test fixture*
+produces: price 4000, `pip_size` 0.01, `pip_value_per_lot` 1.00, spread 0.24,
+minimum stop distance 0. The code hardcodes none of that — every input comes
+from the adapter — so a different symbol specification gives a different number.
+On MT5 the adapter derives the minimum stop distance from the live spread
+(`max((stops_level+5)*point, spread*3)`), and that distance pushes **every**
+level further out:
 
-### 7.4 Not changed, and why
+| spread | min stop distance | first step | estimate |
+| --- | --- | --- | --- |
+| 0.24 | 0.00 (the fixture) | 0.30 | **37.80** |
+| 0.25 | 0.75 | 0.75 | **47.00** |
+| 0.30 | 0.90 | 0.90 | **51.00** |
+| 0.50 | 1.50 | 1.50 | **67.00** |
 
-- **Accounting** — the marked identity, settlement idempotence, the
-  close-reason rule and the day-roll anchor were re-read and probed; no defect
-  found. The Phase F settlement hook links corrections rather than overwriting.
-- **Execution delay** — the separation holds and the bench reproduces it. No
-  further work is useful without real fill times from Windows.
-- **Strategy evaluation** — blocked by missing ticks. Building more strategy
-  machinery before there is data to judge it would be the opposite of what the
-  objective asks for.
-- **AI** — nothing to integrate. There is no trained model, and wiring an
-  untrained one into admission would be the single worst change available.
+Reproduce any row offline, with no terminal:
+`python3 tools/grid_fit_report.py --spread 0.25 --min-stop-distance 0.75`.
 
-### 7.5 Profitability after this pass
+**It is not a proven maximum loss.** It is the marked value of **one scenario**:
+every configured level fills at exactly its own price, the two sides end with
+equal volume, the entry spread is paid once per fill, and the basket is valued as
+if closed back at the reference price. Named exclusions, now carried in code as
+`grid_math.EXCLUDED_FROM_ESTIMATE` and printed by the report:
 
-**Still not measured.** These fixes make the loss limits enforceable; they do
-not make the strategy profitable, and nothing in this repository yet supports a
-claim either way. The freeze at ≈ −$37.80 against a +$10 target remains the
-open question, and it is a question about real tick history, not about code.
+| Scenario / cost | In the estimate? |
+| --- | --- |
+| Fully filled, equal volume, valued at the reference | **yes — this is the scenario** |
+| Entry spread, once per fill | yes |
+| Exit spread, commission, slippage | **no** |
+| Swap | **no** |
+| Partial or unequal fills | **no** — the sides do not cancel |
+| One-directional (trending) exposure | **no** — not frozen; bounded by the basket stop |
+| Cancellation race, rejected close, gap during liquidation | **no** |
+| Spread or minimum stop distance moving after admission | **no** — both read once |
+| Conversion drift on a non-account-currency symbol | **no** — `pip_value_per_lot` is a snapshot |
+
+MT5's `order_calc_profit` would also be an estimate of a specified operation in
+account currency, not a worst-case path loss and not a settlement figure. It was
+not called: no terminal was contacted in this task.
+
+**The refusal is a policy, not a forecast.** The earlier wording said such a
+basket "could only end by forcing the daily limit to liquidate it". That is
+withdrawn. A basket refused on these grounds might well have reached its profit
+target first. The ground for refusal is the declared admission policy — do not
+open a basket whose named adverse scenario is larger than the budget that would
+have to absorb it — and the refusal message now says exactly that, with a test
+asserting it contains no forecast.
+
+**Units and double counting.** Both sides of the comparison are account currency
+(the settings are named `_usd`, which is a misnomer on a non-USD account; they
+are whatever the account is denominated in). Nothing is counted twice:
+`_consider_entry` only reaches admission with **zero** open positions, **zero**
+resting orders and **zero** unsettled closes for this account/symbol/magic, so
+the estimate is the whole of the new exposure and `marked_result` carries none of
+it. Neither side carries a closing-cost buffer: `marked_result` deliberately
+excludes the exit reserve (that is `risk_reading`), and the estimate excludes
+exit costs.
+
+**Withdrawn: the baskets-per-day table.** The previous report presented "a $100
+daily limit holds 2 frozen baskets" as capacity. Dividing a budget by one
+scenario is arithmetic under restricted assumptions, not a permitted trade count
+and not a loss guarantee. It is gone from the runbook.
+
+**Withdrawn: "fully enforceable".** These changes improve **prevention** (a
+configuration whose adverse scenario cannot fit is refused before exposure
+exists) and **recovery** (a halted engine now manages exposure that appears
+after its own close). A limit is still a trigger: a gap, a rejected close, a
+terminal that stops answering, or movement between two protective cycles can
+still overshoot it.
+
+**If the grid does not fit your limits, the rejection stands.** Nothing here
+recommends raising a tolerated loss or funding an account to clear a gate.
+`tools/grid_fit_report.py --alternatives` prints smaller profiles as arithmetic
+for a decision you make later; they are untested, not active, and not known to
+be better. A smaller grid has a smaller adverse scenario *and* a smaller cash
+target, and which way that trade lands is a question for tick history.
+
+### 7.4 Tests: what changed and what was added
+
+**Why six budgets moved to $40.** Each of those tests drives the daily limit to
+*fire*, and each used a limit ($5 or $15) smaller than the fixture's $37.80
+estimate — a configuration admission now refuses before a grid exists, leaving
+nothing to fire. $40 is the smallest round figure above the fixture estimate, so
+each test still exercises the same path. Coverage of the smaller-budget case was
+not lost; it was moved into tests that assert the **refusal**:
+
+| Test | What it pins |
+| --- | --- |
+| `test_a_grid_that_cannot_fit_the_remaining_daily_budget_is_refused` | $15 remaining, refused |
+| `test_an_estimate_exactly_equal_to_the_remaining_budget_is_allowed` | boundary: equal fits |
+| `test_one_cent_less_budget_than_the_estimate_is_refused` | boundary: one cent under refuses |
+| `test_the_refusal_states_a_policy_rather_than_predicting_the_outcome` | the message forecasts nothing |
+| `test_the_same_grid_is_allowed_while_the_budget_can_absorb_it` | the guard does not block everything |
+| `test_protection_over_preexisting_exposure_needs_no_admission` | exposure **constructed directly** under a configuration admission would refuse, then protected |
+
+That last one answers the follow-up's point directly: protection over
+pre-existing exposure no longer depends on admission being willing to create it.
+
+**Close-intent retirement** now has its own file, `tests/test_close_lifecycle.py`
+(9 tests): an unfinished close keeps its intent and keeps entries shut; an
+unconfirmable close is not retired; an order surviving a cancellation race keeps
+the close open; a confirmed close is retired and counted exactly once across
+repeated cycles; a loss exit stays latched and entries do not resurrect;
+settlement rows, realised figures and close reasons survive retirement; a
+restart after completion does not resurrect a finished request; and a manual
+trade on another magic number is never touched.
+
+One of those tests failed when first written, and the fix was to the test, not
+the code: a position appearing after a **basket stop** must be *managed* (marked,
+valued, closed when a limit fires), not closed on sight. Immediate closure is the
+**halted** case, which is covered separately. That distinction is now written
+into the test name and docstring.
+
+**New: `tests/test_grid_math.py`** (11 tests) checks the estimate against hand
+arithmetic shown in each docstring, including a forex-shaped specification that
+produces 320.00 from the same code, that doubling `pip_value_per_lot` doubles the
+result, that a 0.75 minimum stop distance gives 47.00, and that an unreadable
+symbol specification returns 0.00 rather than a guess. It also asserts the
+engine, the gate and the offline report all use one implementation — the level
+arithmetic was duplicated in `_build_grid`, which is now the same call, so the
+gate cannot price a grid the engine would not place.
+
+### 7.5 Corrected performance labels
+
+**The Phase C `net` column was ambiguous and is now four columns.** `net_result`
+sums **closed** baskets only; `remaining_exposure_marked` is what is still open.
+The two sets are disjoint, so they add. Commission is inside both. Re-run:
+
+```
+profile                        done  realised open  open mkd  TOTAL mkd    comm blocked
+baseline                          0      0.00    1    -24.58     -24.58    0.99       0
+research-execution-quality        0      0.00    1    -24.58     -24.58    0.99       0
+research-regime                   1     10.05    1    -33.46     -23.41    1.54     601
+research-event-blackout           0      0.00    0      0.00       0.00    0.00    5700
+research-trailing-exit            0      0.00    1    -24.58     -24.58    0.99       0
+research-execution-and-regime     1     10.04    1    -35.82     -25.78    1.54     625
+```
+
+The follow-up's arithmetic was right: `research-regime` is **−23.41** total
+marked against baseline's **−24.58**, i.e. **1.17 less loss**, both negative, one
+basket, one synthetic fixture. The corrected table also shows something the
+earlier report missed: `research-execution-and-regime` at **−25.78** is *worse*
+than baseline. Strategy selection stays **BLOCKED BY DATA**. Cost assumptions are
+now printed above the table (commission 2.75/lot/side, swap **not modelled**,
+slippage 0, latency 0, spread paid through the quoted side on entry and exit).
+
+**The timing figures are a synthetic benchmark of this process's own loop.**
+84.3 ms full tick versus 25.9 ms protective-only, measured on
+`tests/bench/bench_execution.py` in this Linux container, against in-process
+doubles with stated per-call delays (account 5 ms, positions 12 ms, candles
+25 ms, history sweep 120 ms). That is **not** broker fill latency, **not**
+time-to-close a basket, and **not** anything observed on Windows.
+
+**AI is an offline scaffold, not an integration.** The engine contains no call to
+`decide()` and no `EntryPredictor`: **production shadow wiring is PENDING.** The
+runtime evidence for "a model changes nothing" is no longer a grep — it is
+`tests/test_ai_shadow_integration.py`, which drives a deliberately hostile fake
+inference component (one that rejects everything, one that accepts everything,
+one that raises) through `decide()` in SHADOW mode alongside a live engine and
+compares the actual order prices and the configuration snapshot against a control
+run with no model at all. A grep assertion remains, but only to record the
+absence of wiring so it cannot close silently. No model was trained and no AI was
+enabled.
+
+### 7.6 Data on hand, and what it is not
+
+Checked, not assumed: there is **no** market data in this environment. No `.csv`,
+no `.db`, no `.parquet`, no `data/` directory, no tick export, no trade-history
+export. The uploads in this session are prompt documents plus the TWP preset
+archive (EA `.set` files, not price history). The trading CSV the owner supplied
+earlier is **not present here** — and a trade-history export could help
+reconcile results anyway, but it cannot substitute for tick history: it contains
+fills, not the quotes between them.
+
+June–September is a **starting collection window**, not evidence of sufficiency,
+and nothing here assumes the broker retains that much tick history. Export what
+exists, send the manifest, and let the coverage decide what can be measured.
+
+### 7.7 Status, split the way the follow-up asks
+
+| | Implementation | Integration | Historical evidence | Connected verification | Activation |
+| --- | --- | --- | --- | --- | --- |
+| A capital protection | done | in the live path | none | **not done** | n/a |
+| B execution separation | done | in the live path | synthetic bench only | **not done** | n/a |
+| C strategy selection | harness done | replay only, not live | **none — blocked by data** | **not done** | **no candidate** |
+| D AI / news | **offline scaffold** | **PENDING — no engine call site** | none, no model trained | **not done** | **not authorized** |
+| E validation | done | — | — | **not done** | n/a |
+| F session evidence | done | wired into the engine | **fixture-verified only** | **not done** | n/a |
+
+"Fixture-verified only" is the honest ceiling for F: zero sessions have been
+recorded, so the collector has never run against a terminal.
+
+### 7.8 Test results, exactly as they ran
+
+```
+backend  python3 -m pytest -q                     -> 388 passed
+backend  python3 -m compileall -q app tools       -> OK
+backend  python3 -m tests.bench.collector_dryrun  -> rc 0
+backend  python3 -m tests.bench.run_phase_c       -> BLOCKED BY DATA (corrected table)
+backend  python3 -m tests.bench.bench_execution   -> 84.3 ms full / 25.9 ms protective
+frontend npm test                                 -> 4 passed
+frontend npm run lint                             -> 0 errors, 4 pre-existing warnings
+frontend npm run build                            -> clean
+```
+
+388 passing tests are 388 passing assertions against fake brokers and temporary
+databases in one Linux container. They are not evidence about runtime behaviour
+on Windows, against a real terminal, or under real market conditions — and no
+count of them would be.
