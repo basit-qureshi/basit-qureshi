@@ -20,3 +20,6 @@ backend/runtime_settings.before_grid_restore.json
 backend/evidence/
 backend/*.packet.json
 backend/diagnostics/
+
+# Generated review packets (exported patches of this repo's own history)
+review_packet/
