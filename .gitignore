@@ -23,3 +23,4 @@ backend/diagnostics/
 
 # Generated review packets (exported patches of this repo's own history)
 review_packet/
+goldgrid_review_*.zip
