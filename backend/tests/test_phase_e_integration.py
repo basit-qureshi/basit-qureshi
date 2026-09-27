@@ -469,14 +469,45 @@ def test_same_candle_replacement_requires_a_confirmed_flat_basket(broker, engine
 
 
 def test_replacement_still_passes_every_admission_gate(broker, engine_factory):
-    """A profitable close is not a bypass."""
+    """A profitable close is not a bypass.
+
+    The balance drops below the floor AFTER the win is booked. Dropping it
+    before would be a different test: the capital floor is now an active
+    trigger, so a breach while the basket is still open flattens it as a breach
+    rather than letting it run to its target — that path is
+    `test_a_floor_breach_flattens_even_a_profitable_basket`.
+    """
     e = engine_factory(**live(basket_take_profit_usd=1.0), capital_floor_usd=900.0)
     armed(broker, e)
-    broker.balance = 850.0          # now under the floor
     broker.price += 4.0
     e._tick()
     assert e._baskets_won == 1
+    broker.balance = 850.0          # now under the floor
+    broker.next_candle()
+    e._tick()
     assert orders(broker) == [], "a replacement grid bypassed the capital floor"
+
+
+def test_a_floor_breach_flattens_even_a_profitable_basket(broker, engine_factory):
+    """Protection runs before the profit target, and the floor is protection.
+
+    A basket sitting at a profit is still exposure, and an account under its
+    floor has already crossed the line the owner drew. The basket is flattened
+    as a breach: it is not counted as a win, entries latch, and the liquidation
+    policy stands.
+    """
+    e = engine_factory(**live(basket_take_profit_usd=1.0), capital_floor_usd=900.0)
+    armed(broker, e)
+    broker.balance = 850.0          # under the floor while the basket is open
+    broker.price += 4.0
+    e._tick()
+
+    assert e._halt_reason is not None and "capital floor" in e._halt_reason
+    assert e._baskets_won == 0, "a floor breach was booked as a win"
+    assert broker.get_open_positions("XAUUSD", magic=MAGIC) == []
+    assert orders(broker) == []
+    assert e._entries_paused is True
+    assert e._liquidation is not None and e._liquidation.cause == "capital_floor"
 
 
 # --- migration and restore on a disposable copy -------------------------------

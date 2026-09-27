@@ -14,7 +14,7 @@ integration, evidence, connected verification and activation.
 
 | Question | Answer |
 | --- | --- |
-| Do the **offline checks** pass? | **Yes.** 404 backend tests, 4 frontend tests, lint clean, build clean, and a fixture dry-run that records a full session and exports it. Offline, against fake brokers — see §7.8 for what that does and does not establish. |
+| Do the **offline checks** pass? | **Yes.** 477 backend tests, 4 frontend tests, lint clean, build clean, and a fixture dry-run that records a full session and exports it. Offline, against fake brokers — see §7.8 for what that does and does not establish. |
 | Is a **demo session ready to run**? | **Prepared, not authorized to start.** The collector, the export and the procedure exist. It is blocked on three owner risk numbers (`OWNER_RUNBOOK.md` §E). |
 | Has an **actual session occurred**? | **No.** Zero sessions recorded. Zero demo trades. Zero live trades. |
 | Is **profitability supported**? | **No. Trading performance is not measured.** There is no market data and no session data, so there is nothing to measure it from. |
@@ -547,3 +547,195 @@ frontend npm test                                 -> 4 passed
 404 passing tests are assertions against fake brokers and temporary databases in
 one Linux container. No terminal, no order, no session, and trading performance
 is still not measured.
+
+---
+
+## 9. Independent review round — six findings corrected
+
+An independent review of `goldgrid_review_8319176.zip` applied the 12 patches to
+verified base blobs, ran the suite (404 passed in its own Python 3.12 environment)
+and added six offline probes. All six reproduced. Each is corrected below, with
+the reproduction before and after.
+
+Two of the six were **policy** disagreements rather than implementation slips, and
+those are marked: the code did what the previous report said it did, and what it
+said was not what the owner asked for.
+
+### 9.1 Capital floor — a missing protection (implementation gap)
+
+**Before:** balance 1000, floor 950, basket stop 100, daily limit 200. Admission
+passed; a bot position took equity to 940; a protective cycle left it open with no
+halt. The floor participated in admission and in nothing else, while the
+constructor described it as a line the account is never traded below.
+
+**After:** the floor is an active trigger as well as an entry rule, judged on
+**account equity**, and it persists the reason before liquidating.
+
+The contract, now explicit in code, `.env.example` and the halt reason:
+
+| Question | Answer |
+| --- | --- |
+| Judged on | **account equity** — balance plus every floating position on the account |
+| What it closes | **only what this bot owns**, by magic number. A manual trade or another strategy's position is never touched |
+| Outside activity | equity includes trades this bot does not own, so an outside loss **can** trigger it. Flattening this bot cannot repair that: it removes its own contribution, latches entries, and the halt reason says so |
+| With nothing owned | entry refusal only, no halt — a small account is not locked behind a manual reset for a breach its trading never caused |
+| Guarantee | **none.** A gap, a rejected close or a terminal that stops answering can leave the account below the floor anyway |
+| Costs | the incremental closing cost is included when it is **known** (§9.4); never invented |
+
+Nine regressions, including persistence before liquidation, retry after rejection,
+restart mid-liquidation, a late fill afterwards, a manual trade untouched, an
+outside-loss trigger, and an unreadable equity.
+
+**Found while writing those tests:** `_check_risk_limits` computed
+`(peak − account.equity)` with no check that equity was a number, so a broker
+returning `None` raised a `TypeError` **out of the protective cycle** — the one
+place that must not raise. Equity readability is now established once, before any
+arithmetic.
+
+### 9.2 Late exposure after a loss stop (policy change, now implemented)
+
+**Before:** after a basket stop, a late owned fill was marked and managed but not
+liquidated, and a test explicitly required it to stay open until another threshold
+fired. That was the engine's behaviour and the previous report defended it. It is
+not "close and stop after the loss limit".
+
+**After:** a confirmed close ends the close *attempt*; a loss stop leaves a
+durable **liquidation policy** behind (`app/engine/lifecycle.py`). While it
+stands, exposure this bot owns is cancelled and closed again. It is persisted,
+survives a restart, and is cleared **only** by an explicit owner resume — which
+itself refuses while owned exposure is still open.
+
+The four states stay distinct:
+
+| | Latches entries | Liquidation policy | Late owned exposure |
+| --- | --- | --- | --- |
+| Ordinary pause | yes | **no** | managed, never closed on sight |
+| Profit close | no | **no** | managed; a replacement is permitted |
+| Basket stop | yes | **yes** | cancelled and closed again |
+| Risk halt (daily / drawdown / floor) | yes | **yes** | cancelled and closed again |
+
+Cleanups carry `counts_basket=False`, so three late fills do not become three
+stopped baskets. Fifteen regressions cover repeated fills, rejection and recovery,
+a surviving resting order, restart, a price recovery that changes nothing, and a
+manual trade left alone.
+
+### 9.3 Fabricated symbol valuation (implementation gap)
+
+**Before:** `MT5Broker.get_symbol_info` read `info.trade_tick_value or 1.0`, so a
+broker reporting no tick value produced "one unit per point" and every figure
+downstream inherited it. Reproduced against a fake terminal: raw tick value 0.0
+became `pip_value_per_lot = 1.0`, and admission priced a grid on it.
+
+**After:** validation, not defaulting. `SymbolInfo` carries `valuation_ok`,
+`valuation_problems`, `quote_available` and `spread_available`; the estimate
+carries `valid` and `problem`; admission refuses with the specific diagnostic and
+keeps managing existing exposure. Covered: `0`, `None`, `NaN`, `inf`, negative,
+non-numeric, crossed bid/ask, and a missing quote. **A genuinely observed zero
+spread is usable; no quote at all is not** — the two no longer collapse into the
+same number. A missing tick *size* still falls back to the point size, which is
+the same quantity; a missing tick *value* falls back to nothing, because it is
+the money.
+
+### 9.4 Closing costs — one contract, unknowns that block
+
+**Before:** `_estimated_exit_cost` returned an unverified half-spread; the daily
+loss trigger ignored it; admission ignored the exit entirely; the fit report
+printed a fourth arithmetic. Reproduced: marked −99.00 with a 2.00 reserve against
+a 100.00 limit gave `risk_reading` −101.00, and the trigger read −99.00 and did
+not fire.
+
+**After:** `app/engine/costs.py` is the single contract, and it separates the four
+quantities that behave differently:
+
+| Quantity | Treatment |
+| --- | --- |
+| Already inside the broker's figure | `profit_includes_exit_spread` — `True` means the exit spread is **not** charged again; `None` (unverified) is an **unknown**, not an assumption either way |
+| Already booked (swap, commission taken) | inside `net_profit`; **never added again** |
+| Future commission (closing side) | owner's contract figure, or **UNKNOWN** |
+| Slippage | owner's observed figure, or **UNKNOWN** |
+
+Two readings, because the directions are not symmetric:
+
+* **conservative** — may use an unverified upper bound, because it only ever
+  *delays* a profit exit. This preserves the previous behaviour of the profit
+  target.
+* **defensible** — `None` unless every component is verified or owner-supplied.
+  Only this one may bring a loss exit forward, and only this one satisfies
+  admission.
+
+The daily trigger now reads `risk_reading`, which equals the marked result exactly
+when no defensible cost exists — so a **known** cost fires the limit earlier, and
+an unverified one still cannot. Admission blocks when the prospective grid's
+closing cost is unknown, naming the settings to supply. It prices the grid it
+would **create**, not the empty book — the first version of that gate asked what
+it costs to close nothing and passed trivially.
+
+Three new settings, all defaulting to UNKNOWN rather than zero:
+`EXIT_COMMISSION_PER_LOT_USD`, `SLIPPAGE_POINTS_PER_FILL`,
+`BROKER_PROFIT_INCLUDES_EXIT_SPREAD`. **The owner's saved risk settings were not
+changed.** Test doubles state their own truthful values (both charge nothing and
+neither includes the exit spread in its profit figure).
+
+### 9.5 Scheduling — the cadence, measured properly
+
+**Before:** `_loop` awaited `_maybe_report`, which ran reporting synchronously.
+Deterministic probe, 10 ms configured cadence and 250 ms of reporting work:
+successive protective **starts** were 250 ms apart. A 25.9 ms benchmark of the
+protective *function* said nothing about it.
+
+**After**, same probe:
+
+```
+before: gaps 251.7, 250.7, 250.8, 250.6 ms     (every cycle)
+after : gaps 264.0, 10.6, 10.7, 10.7, 10.5, 10.5, 17.5, 10.7, ... ms
+        median 10.6 ms, worst 264.0 ms, 1 overrun recorded
+```
+
+Three mechanisms: reporting is **staged** against a time budget and defers the
+history sweep and then the entry decision at stage boundaries; reporting's broker
+reads go through the **single owner** at REPORTING priority so it can stand aside
+between calls; and a cycle that still overruns puts reporting in an **absolute
+cooldown** of four times what it consumed.
+
+The first attempt at that cooldown multiplied the configured interval — and an
+interval of zero stays zero however often it is doubled. A test now pins that
+case.
+
+**What is still true and is asserted rather than hidden:** a synchronous broker
+call already in flight cannot be interrupted, so one cycle still absorbs it. The
+worst case above (264 ms) is exactly that. `status().scheduling` reports
+`cadence_delay_ms`, `protective_decision_ms`, `reporting_cycle_ms` and
+`close_to_confirmed_flat_ms` separately, each labelled as an in-process span, with
+a note that broker acknowledgement and fill times are **not** measured here. The
+close-to-flat span is not fabricated across a restart, because the monotonic clock
+that started it is gone.
+
+### 9.6 Rounding at a decision boundary (implementation gap)
+
+**Before:** `_basket_pnl` rounded to cents and its only live caller passed that to
+`_profit_target_met`, which documented itself as comparing unrounded values.
+Reproduced: net 9.996 against a 10.00 target — the direct helper answered `False`,
+the real composition answered `True`.
+
+**After:** `_basket_pnl` returns raw values, `_basket_pnl_display` rounds, and the
+API card and broadcast use the display variant. Position marks are kept raw too.
+Regressions go through the real composition, for the profit target and the basket
+stop, in both directions.
+
+### 9.7 Verification for this round
+
+```
+backend  python3 -m pytest -q                -> 477 passed
+backend  python3 -m compileall -q app tools  -> OK
+```
+
+Six probes re-run after the fixes: the floor liquidates and latches; a late fill
+after a basket stop is cleaned up; a zero tick value is refused instead of becoming
+1.0; a known closing cost brings the daily limit forward; the protective cadence
+recovers to its configured interval; and 9.996 no longer clears a 10.00 target.
+
+**What none of this establishes.** No terminal was contacted, no order was placed,
+no market data exists, and no session has been recorded. The figures 37.80, 46.20
+and 52.80 remain conditional arithmetic for one scenario, not maximum losses.
+**Profitability is still not measured**, and 477 passing offline tests are not
+evidence of a trading edge.

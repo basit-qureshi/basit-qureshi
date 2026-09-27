@@ -28,6 +28,7 @@ basket_stop_loss_usd. They are the whole risk model, not decoration.
 
 import asyncio
 import logging
+import math
 import time
 from datetime import date, datetime, timezone
 from typing import Callable, Optional
@@ -39,15 +40,19 @@ from app.brokers.base import BrokerAdapter, OrderSide, PendingType, Position
 from app.db import TradeRecord
 from app.engine.lifecycle import (
     CAUSE_BASKET_STOP,
+    CAUSE_CAPITAL_FLOOR,
     CAUSE_DAILY_LOSS,
     CAUSE_DRAWDOWN,
+    CAUSE_LIQUIDATION,
     CAUSE_OWNER,
     CAUSE_PROFIT,
+    LIQUIDATING_CAUSES,
     STATE_CLOSING,
     STATE_DONE,
     STATE_RECONCILING,
     Admission,
     CloseIntent,
+    LiquidationPolicy,
 )
 from app.engine.broker_owner import PROTECTIVE, REPORTING, BrokerOwner, SkipReporting
 from app.engine.instrumentation import (
@@ -56,7 +61,7 @@ from app.engine.instrumentation import (
     monotonic_ms,
     new_correlation_id,
 )
-from app.engine import grid_math
+from app.engine import costs, grid_math
 from app.engine.risk_accounting import build_day_risk
 from app.evidence import session as evidence_session
 
@@ -90,8 +95,12 @@ class GridEngine:
         timezone_name: str = "Asia/Karachi",
         capital_reserve_percent: float = 50.0,
         capital_floor_usd: float = 0.0,
+        exit_commission_per_lot: float | None = None,
+        slippage_points_per_fill: float | None = None,
+        broker_profit_includes_exit_spread: str = "unverified",
         protective_poll_seconds: float = 1.0,
         reporting_poll_seconds: float = 5.0,
+        reporting_time_budget_ms: float = 400.0,
         stall_after_ms: float = 4000.0,
         on_update: Optional[Callable[[dict], None]] = None,
     ):
@@ -209,6 +218,10 @@ class GridEngine:
         #: Last completed-grid estimate, with its components, so the dashboard
         #: can show the owner THEIR number rather than a figure from a fixture.
         self._last_grid_estimate = None
+        #: A standing instruction to hold this bot's exposure at zero, left
+        #: behind by a loss stop. Survives a successful close and a restart;
+        #: cleared only by an explicit owner resume.
+        self._liquidation: LiquidationPolicy | None = None
         # ticket -> the settlement event it was first recorded in, so a later
         # revision links a correction instead of rewriting the original.
         self._settlement_events: dict[str, tuple[str, float | None]] = {}
@@ -228,8 +241,25 @@ class GridEngine:
         self._last_symbol_info = None
         # Protection runs on its own cadence, independent of the M1 candle
         # boundary and of the dashboard's refresh. Reporting runs slower.
+        # Closing-cost inputs. None means UNKNOWN, never zero: an unknown
+        # blocks new exposure and keeps a loss exit from firing early on a guess.
+        self.exit_commission_per_lot = exit_commission_per_lot
+        self.slippage_points_per_fill = slippage_points_per_fill
+        self.broker_profit_includes_exit_spread = broker_profit_includes_exit_spread
         self.protective_poll_seconds = protective_poll_seconds
+        self._last_protective_start_ms: float | None = None
+        self._reporting_cooldown_until_ms = 0.0
+        self._reporting_deferrals = 0
+        self._intent_started_ms: float | None = None
         self.reporting_poll_seconds = reporting_poll_seconds
+        #: How long one reporting cycle may take before it defers the rest of its
+        #: work to a later cycle. Protection is not allowed to wait on reporting
+        #: for longer than this, except for a broker call already in flight.
+        self.reporting_time_budget_ms = reporting_time_budget_ms
+        #: After a reporting cycle overruns its budget, it waits this multiple of
+        #: the time it consumed before running again. 4.0 means reporting can take
+        #: at most a fifth of the loop when it is slow.
+        self.reporting_overrun_cooldown_factor = 4.0
         self._protective_backoff = 0.0
         self._last_reporting_ms = 0.0
         self._reporting_overruns = 0
@@ -321,6 +351,16 @@ class GridEngine:
         try:
             while self._running:
                 cycle_started = monotonic_ms()
+                # The ACTUAL cadence, measured: how much later this protective
+                # cycle started than the configured interval allowed. This is the
+                # number that says whether protection is running on time, and it
+                # is not the same as how long the protective function takes.
+                if self._last_protective_start_ms is not None:
+                    interval = (self._protective_backoff or self.protective_poll_seconds) * 1000.0
+                    self._timing.record(
+                        "cadence_delay",
+                        max(0.0, (cycle_started - self._last_protective_start_ms) - interval))
+                self._last_protective_start_ms = cycle_started
                 try:
                     result = self._protective_tick()
                     self._last_error = None
@@ -347,25 +387,57 @@ class GridEngine:
             pass
 
     async def _maybe_report(self, protective_result) -> None:
-        """Reporting work, bounded and never in front of protection.
+        """Reporting work, bounded, deferrable, and never queued up.
 
-        Runs at most once every `reporting_poll_seconds`, and is skipped while
-        the broker owner is busy with protective work. A skipped cycle is
-        counted, not queued: a backlog of stale reporting reads is worth less
-        than the protective read it would delay.
+        Three separate protections, because they fail differently:
+
+        * an INTERVAL, so reporting does not run every protective cycle;
+        * a TIME BUDGET handed to `_reporting_tick`, which stops at its next
+          stage boundary when the budget is spent and defers the rest;
+        * a BACKOFF when a run still overran the budget, so a genuinely slow
+          terminal does not get handed the loop again immediately. A skipped
+          cycle is counted, not queued: stale reporting reads are worth less than
+          the protective read they would delay.
+
+        What none of this can do is interrupt a synchronous broker call that has
+        already started. That cost is measured as `cadence_delay`, and the honest
+        statement is that protection is delayed by at most one in-flight call.
         """
         now = monotonic_ms()
-        if self._last_reporting_ms and (now - self._last_reporting_ms) < self.reporting_poll_seconds * 1000.0:
+        if now < self._reporting_cooldown_until_ms:
+            # Still serving out the cooldown from a run that overran. Multiplying
+            # the configured interval was not enough: an interval of zero stays
+            # zero however often it is doubled, so the cooldown is ABSOLUTE and
+            # derived from how long the slow run actually took.
+            self._reporting_deferrals += 1
+            return
+        interval = self.reporting_poll_seconds * 1000.0
+        if self._last_reporting_ms and (now - self._last_reporting_ms) < interval:
             return
         self._last_reporting_ms = now
         started = now
+        budget = self.reporting_time_budget_ms
         try:
-            self._reporting_tick(protective_result)
+            self._reporting_tick(protective_result, deadline_ms=started + budget)
         except SkipReporting:
             self._reporting_overruns += 1
             logger.debug("reporting cycle stood aside for protective work")
         finally:
-            self._timing.record("reporting_tick", monotonic_ms() - started)
+            took = monotonic_ms() - started
+            self._timing.record("reporting_tick", took)
+            if took > budget:
+                # Still over budget after staging: one broker call was slow and
+                # could not be interrupted. Reporting now waits a multiple of the
+                # time it just consumed, which bounds the share of the loop it can
+                # take to 1/(1+factor) and lets the protective cadence recover.
+                cooldown = min(took * self.reporting_overrun_cooldown_factor, 60_000.0)
+                self._reporting_cooldown_until_ms = monotonic_ms() + cooldown
+                self._reporting_overruns += 1
+                logger.warning("reporting took %.0f ms against a %.0f ms budget — not run "
+                               "again for %.0f ms so protection keeps its cadence",
+                               took, budget, cooldown)
+            else:
+                self._reporting_cooldown_until_ms = 0.0
 
     # ------------------------------------------------------------------ tick
 
@@ -407,6 +479,17 @@ class GridEngine:
                 return {
                     "correlation_id": cid, "account": account, "positions": positions,
                     "pendings": pendings, "closing": outstanding,
+                }
+
+            # A standing liquidation policy outranks every other protective
+            # question except an intent already in flight. Exposure that turned
+            # up after a loss stop is removed, not measured against thresholds
+            # it was never supposed to reach again.
+            if self._enforce_liquidation_policy(positions, pendings):
+                return {
+                    "correlation_id": cid, "account": account,
+                    "positions": self._safe_positions() or [], "pendings": self._safe_pendings() or [],
+                    "closing": True,
                 }
 
             if self._check_risk_limits(account, positions, pendings):
@@ -468,21 +551,36 @@ class GridEngine:
                 "pendings": pendings, "closing": False,
             }
 
-    def _reporting_tick(self, protective_result=None) -> None:
+    def _reporting_tick(self, protective_result=None, deadline_ms: float | None = None) -> None:
         """Everything a decision does not need: history, settlement, entries, UI.
 
         Entry admission lives here rather than on the protective path. Opening
         a new grid is not urgent — it can wait for the next reporting cycle —
         whereas closing one cannot. Nothing here can create exposure without
         going through the same `_entry_gate` as before.
+
+        **Staged against a deadline.** This runs synchronously on the same loop
+        as protection, so the honest way to stop it delaying the next protective
+        cycle is to give it a time budget and stop at the next stage boundary
+        when it is spent. What is deferred is deferred, not dropped: the history
+        sweep and the entry decision both come back on a later cycle.
+
+        The limit this does NOT remove: one synchronous broker call cannot be
+        interrupted once it has started. A single 250 ms read still postpones the
+        next protective start by 250 ms. That is measured (`cadence_delay_ms` in
+        the status payload) rather than papered over, and the loop stops handing
+        reporting a budget while it is behind.
         """
+        def spent() -> bool:
+            return deadline_ms is not None and monotonic_ms() >= deadline_ms
+
         account = (protective_result or {}).get("account") or self.broker.get_account_info()
         self._bind_account(account)
         candle = self._current_candle_time()
         self._roll_day(account.equity, candle)
 
-        positions = self._safe_positions()
-        pendings = self._safe_pendings()
+        positions = self._reporting_positions()
+        pendings = self._reporting_pendings()
         if positions is None or pendings is None:
             # Unreadable is not empty. Report it as unknown and try again.
             self._broadcast(account, positions, pendings, 0.0, note="broker state unreadable")
@@ -490,6 +588,15 @@ class GridEngine:
 
         self._record_new_fills(positions, candle)
         self._settle_closed_trades()
+
+        # Stage boundary: the history sweep is the expensive one and it is
+        # already interval-throttled, so it is the first thing to defer.
+        if spent():
+            self._reporting_deferrals += 1
+            self._broadcast(account, positions, pendings, self._basket_value(positions),
+                            note="reporting deferred to keep the protective cadence",
+                            hedged=self._is_hedged(positions))
+            return
         self._sync_broker_history()
 
         basket_net, basket_gross, costs_known = self._basket_pnl(positions)
@@ -504,6 +611,14 @@ class GridEngine:
             return
         if self._halt_reason:
             self._broadcast(account, positions, pendings, basket_profit, hedged=hedged)
+            return
+
+        # Stage boundary: a new grid is never urgent. Deferring it costs a cycle;
+        # delaying a protective read costs money.
+        if spent():
+            self._reporting_deferrals += 1
+            self._broadcast(account, positions, pendings, basket_profit, hedged=hedged,
+                            note="entry decision deferred to keep the protective cadence")
             return
 
         self._consider_entry(account, positions, pendings, candle, basket_profit, hedged)
@@ -763,6 +878,10 @@ class GridEngine:
             return self._close_intent
         self._basket_id = self._basket_id or self._new_basket_id()
         self._close_intent = CloseIntent(cause=cause, reason=reason, basket_id=self._basket_id)
+        # Monotonic, and deliberately not persisted: after a restart the clock
+        # that started this is gone, and inventing a span across it would be the
+        # clock-subtraction mistake Phase B removed.
+        self._intent_started_ms = monotonic_ms()
         self._persist_risk_state()
         self._record_evidence(evidence_session.CLOSE_INTENT_OPENED,
                              basket_id=self._basket_id, cause=cause, reason=reason,
@@ -821,16 +940,33 @@ class GridEngine:
 
         intent.state = STATE_DONE
         intent.last_error = None
+        if self._intent_started_ms is not None:
+            # Time from ordering the close to the BROKER confirming flat. This is
+            # a different quantity from how long the protective function takes,
+            # and it is the one that matters when a stop fires.
+            self._timing.record("close_to_confirmed_flat",
+                                monotonic_ms() - self._intent_started_ms)
+            self._intent_started_ms = None
         self._record_evidence(evidence_session.CLOSE_INTENT_DONE,
                              basket_id=intent.basket_id, cause=intent.cause,
                              attempts=intent.attempts, confirmed_flat=True)
-        if not intent.counted:
-            # Counted once for the basket, not once per retry.
+        if not intent.counted and intent.counts_basket:
+            # Counted once for the basket, not once per retry, and never for a
+            # cleanup ordered by a standing liquidation policy: that basket was
+            # already counted when it ended.
             intent.counted = True
             if intent.cause == CAUSE_PROFIT:
                 self._baskets_won += 1
             elif intent.cause == CAUSE_BASKET_STOP:
                 self._baskets_stopped += 1
+        # A loss stop leaves a STANDING instruction behind. The close attempt is
+        # over; the decision is not. Exposure this bot owns that appears after
+        # this point is cancelled and closed again rather than merely managed,
+        # until the owner resumes.
+        if intent.cause in LIQUIDATING_CAUSES and self._liquidation is None:
+            self._liquidation = LiquidationPolicy(cause=intent.cause, reason=intent.reason)
+            logger.warning("liquidation policy in force (%s): this bot's exposure is held "
+                           "at zero until an explicit resume", intent.cause)
         if intent.latches_entries:
             # A loss exit does not quietly rebuild. Resuming is an owner action.
             self._entries_paused = True
@@ -847,6 +983,47 @@ class GridEngine:
         # own close confirmed, which is the one state it must never ignore.
         self._retire_finished_intent(intent)
         return False
+
+    def _enforce_liquidation_policy(self, positions, pendings) -> bool:
+        """Removes exposure this bot owns while a loss policy stands.
+
+        Returns True when a cleanup was ordered this cycle, so the caller stops
+        and lets the close run rather than evaluating entry-side questions.
+
+        Ownership is not widened by any of this: `positions` and `pendings` are
+        already filtered to this account, symbol and magic number, so a manual
+        trade or another strategy's position is not visible here and cannot be
+        touched.
+        """
+        policy = self._liquidation
+        if policy is None or not (positions or pendings):
+            return False
+        if self._close_intent is not None and not self._close_intent.finished:
+            return False        # one already in flight; do not duplicate it
+
+        policy.cleanups += 1
+        logger.warning(
+            "liquidation policy (%s) found %d position(s) and %d order(s) after the basket "
+            "ended — cleanup %d",
+            policy.cause, len(positions), len(pendings), policy.cleanups,
+        )
+        self._record_evidence(evidence_session.LIMIT_EVENT, cause=CAUSE_LIQUIDATION,
+                              reason=f"liquidation policy ({policy.cause}) cleanup "
+                                     f"{policy.cleanups}",
+                              positions=len(positions), orders=len(pendings))
+        intent = self._open_close_intent(
+            CAUSE_LIQUIDATION,
+            f"liquidation policy after {policy.cause}: {policy.reason}",
+        )
+        # This close ends no basket: the basket ended when the policy was set.
+        intent.counts_basket = False
+        outstanding = self._drive_close_intent(positions, pendings)
+        if not outstanding and self._close_intent is not None:
+            self._retire_finished_intent(self._close_intent)
+        if outstanding:
+            policy.last_error = self._close_intent.last_error if self._close_intent else None
+        self._persist_risk_state()
+        return True
 
     def _retire_finished_intent(self, intent: CloseIntent) -> None:
         """Clears a completed intent exactly once.
@@ -865,6 +1042,30 @@ class GridEngine:
             self._gate_anchor = self._gate_reason = None
             self._had_grid = False
         self._persist_risk_state()
+
+    def _reporting_positions(self):
+        """Positions read at REPORTING priority, through the single owner.
+
+        The reporting path used to call the adapter directly, so the owner could
+        not yield to protective work between calls. `SkipReporting` propagates:
+        standing aside is the correct outcome, not an error to swallow.
+        """
+        try:
+            return self._owner.positions(self.symbol, self.magic_number, priority=REPORTING)
+        except SkipReporting:
+            raise
+        except Exception:
+            logger.exception("could not read open positions (reporting)")
+            return None
+
+    def _reporting_pendings(self):
+        try:
+            return self._owner.pendings(self.symbol, self.magic_number, priority=REPORTING)
+        except SkipReporting:
+            raise
+        except Exception:
+            logger.exception("could not read pending orders (reporting)")
+            return None
 
     def _safe_positions(self):
         try:
@@ -906,13 +1107,35 @@ class GridEngine:
         return True, f"Entries paused. {cancelled} resting order(s) cancelled; open positions are still managed."
 
     def resume_entries(self) -> tuple[bool, str]:
-        """Owner action. Refuses while a halt or an unfinished close stands."""
+        """Owner action. Refuses while a halt or an unfinished close stands.
+
+        This is the ONLY thing that clears a liquidation policy, and it refuses
+        while exposure this bot owns is still open: lifting the instruction over
+        live exposure would leave that exposure unmanaged by the very policy
+        that was put there to remove it.
+        """
         if self._halt_reason:
             return False, f"Not resumed: a risk halt is still active — {self._halt_reason}"
         if self._close_intent and not self._close_intent.finished:
             return False, f"Not resumed: a close is still in progress ({self._close_intent.state})"
         if self._persist_failed:
             return False, f"Not resumed: {self._persist_failed}"
+        if self._liquidation is not None:
+            positions = self._safe_positions()
+            pendings = self._safe_pendings()
+            if positions is None or pendings is None:
+                return False, ("Not resumed: the broker could not be read, so this bot's "
+                               "exposure is not confirmed to be zero.")
+            if positions or pendings:
+                return False, (
+                    f"Not resumed: {len(positions)} position(s) and {len(pendings)} order(s) "
+                    f"owned by this bot are still open under the liquidation policy "
+                    f"({self._liquidation.cause}). They are being closed; resume once the "
+                    f"broker reports none."
+                )
+            logger.warning("liquidation policy cleared by owner resume (%s, %d cleanup(s))",
+                           self._liquidation.cause, self._liquidation.cleanups)
+            self._liquidation = None
         self._entries_paused = False
         self._pause_reason = None
         self._close_intent = None
@@ -1009,16 +1232,27 @@ class GridEngine:
     # --------------------------------------------------- money, honestly
 
     def _basket_pnl(self, positions: list[Position]) -> tuple[float, float, bool]:
-        """(net, gross, every cost known).
+        """(net, gross, every cost known) — UNROUNDED, for decisions.
 
         Gross is price movement alone. Net adds the swap and commission the
         broker has already booked. They differ by real money, and a basket
         closed on the gross number pays out less than the target promised.
         `costs_known` is False when any position could not report its costs.
+
+        **These values are not rounded.** They used to be, and `_profit_target_met`
+        documented itself as comparing unrounded values while its only live caller
+        handed it a rounded one: a basket at 9.996 against a 10.00 target became
+        10.00 and crossed. Rounding belongs at the display boundary, which is
+        `_basket_pnl_display` and the broadcast, not in front of a comparison.
         """
         gross = sum(p.profit or 0.0 for p in positions)
         net = sum(p.net_profit for p in positions)
         known = all(getattr(p, "costs_known", True) for p in positions)
+        return net, gross, known
+
+    def _basket_pnl_display(self, positions: list[Position]) -> tuple[float, float, bool]:
+        """The same figures rounded to cents, for cards, logs and the wire."""
+        net, gross, known = self._basket_pnl(positions)
         return round(net, 2), round(gross, 2), known
 
     def _basket_value(self, positions: list[Position]) -> float:
@@ -1029,7 +1263,7 @@ class GridEngine:
         """
         net, _gross, _known = self._basket_pnl(positions)
         reserve = self._estimated_exit_cost(positions)
-        return round(net - (reserve or 0.0), 2)
+        return round(net - (reserve or 0.0), 2)      # rounded at the display boundary
 
     def _profit_target_met(self, positions, basket_net: float, costs_known: bool, exit_cost) -> bool:
         """Whether the basket has genuinely earned the target.
@@ -1056,46 +1290,94 @@ class GridEngine:
             return False
         return (basket_net - exit_cost) >= self.basket_take_profit_usd
 
+    def _closing_cost(self, positions: list[Position], info=None) -> costs.ClosingCost:
+        """What closing these positions is still expected to cost. One contract.
+
+        Everything downstream reads this: the profit target (via the conservative
+        reading), the daily loss trigger and admission (via the defensible
+        reading), the display value, and the status payload. Three different
+        answers to this question is how a reserve came to be subtracted in one
+        place, ignored in another, and printed with a third arithmetic in the fit
+        report.
+        """
+        if not positions:
+            return costs.ClosingCost(conservative=0.0, defensible=0.0)
+        if info is None:
+            try:
+                info = self.broker.get_symbol_info(self.symbol)
+            except Exception:
+                logger.warning("exit cost is not estimable: symbol info unavailable")
+                return costs.ClosingCost(conservative=None, defensible=None,
+                                         unknowns=("symbol_valuation",),
+                                         notes=("the symbol could not be read",))
+        semantic = {"yes": True, "no": False}.get(
+            str(self.broker_profit_includes_exit_spread).strip().lower(),
+            getattr(info, "profit_includes_exit_spread", None))
+        inputs = costs.ClosingCostInputs.from_broker(
+            info, exit_commission_per_lot=self.exit_commission_per_lot,
+            slippage_points_per_fill=self.slippage_points_per_fill)
+        # The owner's stated broker semantic overrides the adapter's None.
+        inputs = costs.ClosingCostInputs(
+            pip_size=inputs.pip_size, pip_value_per_lot=inputs.pip_value_per_lot,
+            spread=inputs.spread, spread_available=inputs.spread_available,
+            profit_includes_exit_spread=semantic,
+            exit_commission_per_lot=inputs.exit_commission_per_lot,
+            slippage_points_per_fill=inputs.slippage_points_per_fill)
+        volume = sum(p.volume for p in positions)
+        return costs.closing_cost(volume, len(positions), inputs)
+
+    def _prospective_closing_cost(self, info, estimate) -> costs.ClosingCost:
+        """What closing the grid this admission would place is expected to cost.
+
+        The whole grid, every level filled: that is the same scenario the
+        completed-grid estimate prices on the entry side, so the two halves of
+        the comparison describe the same basket.
+        """
+        semantic = {"yes": True, "no": False}.get(
+            str(self.broker_profit_includes_exit_spread).strip().lower(),
+            getattr(info, "profit_includes_exit_spread", None))
+        base = costs.ClosingCostInputs.from_broker(
+            info, exit_commission_per_lot=self.exit_commission_per_lot,
+            slippage_points_per_fill=self.slippage_points_per_fill)
+        inputs = costs.ClosingCostInputs(
+            pip_size=base.pip_size, pip_value_per_lot=base.pip_value_per_lot,
+            spread=base.spread, spread_available=base.spread_available,
+            profit_includes_exit_spread=semantic,
+            exit_commission_per_lot=base.exit_commission_per_lot,
+            slippage_points_per_fill=base.slippage_points_per_fill)
+        return costs.closing_cost(estimate.total_volume, estimate.fills, inputs)
+
     def _estimated_exit_cost(self, positions: list[Position]) -> float | None:
-        """What closing this basket is still expected to cost, or None.
+        """The CONSERVATIVE reading, for delaying a profit exit.
 
         None means "not estimable right now" and is deliberately NOT zero.
         Returning zero on a failed symbol read was the old behaviour and it
         failed open: exactly when data was bad, the reading quietly became less
         conservative.
 
-        Double counting. If the broker's floating profit is already struck at
-        the executable closing side - which MT5's is understood to be - then a
-        further half-spread per position charges the exit twice. That semantic
-        is not verified for this adapter, so `SymbolInfo.profit_includes_exit_spread`
-        stays None and the reserve is treated as UNVERIFIED: it tightens the
-        profit target (delaying a close is safe) and is deliberately not used
-        to bring a loss exit forward (firing early on an unverified assumption
-        is not).
+        This reading may include an unverified upper bound, because using it can
+        only DELAY a close. `_defensible_exit_cost` is the one that may bring a
+        loss exit forward, and it refuses to guess.
         """
-        if not positions:
-            return 0.0
-        try:
-            info = self.broker.get_symbol_info(self.symbol)
-        except Exception:
-            logger.warning("exit cost is not estimable: symbol info unavailable")
-            return None
-        if not info.pip_size:
-            return None
-        if info.profit_includes_exit_spread is True:
-            # Already inside the broker's figure; charging it again would be a
-            # second subtraction of the same money.
-            return 0.0
-        per_point = info.pip_value_per_lot
-        half_spread_points = (info.spread / info.pip_size) / 2
-        return round(sum(half_spread_points * p.volume * per_point for p in positions), 2)
+        return self._closing_cost(positions).conservative
+
+    def _defensible_exit_cost(self, positions: list[Position]) -> float | None:
+        """The reading that may fire a loss exit earlier, or None.
+
+        None whenever any component is unknown — an unverified broker semantic, a
+        commission nobody has supplied, an unobserved slippage figure. Firing a
+        protective exit early on a number nobody established is not protection.
+        """
+        return self._closing_cost(positions).defensible
 
     def _mark_positions(self, positions: list[Position]) -> None:
         """Remembers each open position's net mark, and notices which tickets
         have left the broker's open list without settling yet."""
         live = {(p.identifier or p.ticket) for p in positions}
         for p in positions:
-            self._last_marks[p.identifier or p.ticket] = round(p.net_profit, 2)
+            # Kept raw. These marks feed the day's marked risk reading, which is a
+            # decision quantity; the wire form rounds them.
+            self._last_marks[p.identifier or p.ticket] = float(p.net_profit)
         gone = set(self._last_marks) - live
         for ticket in gone:
             if ticket in self._known_tickets or ticket in self._awaiting_settlement:
@@ -1108,7 +1390,7 @@ class GridEngine:
         settlement gap: the loss would appear to vanish at precisely the moment
         it became permanent.
         """
-        return round(sum(self._last_marks.get(t, 0.0) for t in self._awaiting_settlement), 2)
+        return sum(self._last_marks.get(t, 0.0) for t in self._awaiting_settlement)
 
     def _day_risk(self, positions: list[Position] | None = None):
         """The day's risk picture, from reconciled sources only.
@@ -1137,7 +1419,10 @@ class GridEngine:
             open_positions_marked=net,
             day_open_marked=self._day_open_marked,
             pending_settlement_marked=self._pending_settlement_marked(),
-            exit_reserve=self._estimated_exit_cost(positions),
+            # The DEFENSIBLE reading, so `risk_reading` is only ever tightened by
+            # a cost that was verified or supplied. An unverified upper bound
+            # would bring a protective exit forward on a guess.
+            exit_reserve=self._defensible_exit_cost(positions),
             extra_incomplete=tuple(extra),
         )
 
@@ -1400,8 +1685,32 @@ class GridEngine:
         except Exception as exc:
             return False, f"Cannot price the grid: {exc}. No orders placed."
 
-        balance = account.balance or 0.0
-        if balance <= 0:
+        # The symbol specification has to be usable before anything is measured
+        # against it. An unknown tick value, an unreadable point size or a missing
+        # quote all mean the same thing here: this grid cannot be priced, so it is
+        # not opened. Existing exposure is unaffected — the protective path does
+        # not come through admission.
+        if not getattr(info, "valuation_ok", True):
+            problems = "; ".join(getattr(info, "valuation_problems", ()) or ("unspecified",))
+            self._entry_unknowns = tuple(getattr(info, "valuation_problems", ()) or ())
+            return False, (
+                f"NO_TRADE: the broker's specification for {self.symbol} cannot price this grid "
+                f"({problems}). Nothing is substituted for a missing valuation input. Existing "
+                f"positions are still managed."
+            )
+        if not getattr(info, "spread_available", True):
+            self._entry_unknowns = ("spread",)
+            return False, (
+                f"NO_TRADE: no quote is available for {self.symbol}, so the spread this grid "
+                f"would pay is unknown. A missing quote is not a zero spread. Existing "
+                f"positions are still managed."
+            )
+        if not math.isfinite(price) or price <= 0:
+            self._entry_unknowns = ("price",)
+            return False, f"NO_TRADE: the current price for {self.symbol} is unusable ({price!r})."
+
+        balance = account.balance
+        if not isinstance(balance, (int, float)) or not math.isfinite(balance) or balance <= 0:
             return False, "Account balance is zero or unreadable — no orders placed."
 
         # 0. The capital floor: a persistent line under the account, separate
@@ -1426,6 +1735,13 @@ class GridEngine:
 
         # 2. The grid must be able to finish building inside that budget.
         estimate = self._completed_grid_estimate(price, info)
+        if not estimate.valid:
+            self._entry_unknowns = ("completed_grid_estimate",)
+            return False, (
+                f"NO_TRADE: this grid's completed-grid exposure cannot be estimated "
+                f"({estimate.problem}). A zero estimate from an unpriceable symbol is not a "
+                f"cheap grid, so it is not treated as one."
+            )
         frozen = estimate.total
         self._last_grid_estimate = {
             "total": estimate.total,
@@ -1496,6 +1812,24 @@ class GridEngine:
                 f"the {balance:.2f} balance has {floor_headroom:.2f} of headroom above the "
                 f"{self.capital_floor_usd:.2f} capital floor. Admission policy refuses a grid whose "
                 f"completed-grid estimate exceeds that headroom."
+            )
+
+        # 2c. Closing costs. A budget comparison that silently omits the exit is
+        #     not a budget comparison, and the fix is not to invent a fee: it is
+        #     to refuse until the owner has supplied one. Existing exposure keeps
+        #     being managed either way — this gate only governs NEW baskets.
+        # Priced on the grid this admission would CREATE, not on the book as it
+        # stands. Admission only runs when nothing is open, so asking what it
+        # costs to close the current positions would always answer "nothing" and
+        # the gate would pass on an empty question.
+        cost = self._prospective_closing_cost(info, estimate)
+        if not cost.fully_known:
+            self._entry_unknowns = tuple(cost.unknowns)
+            return False, (
+                "NO_TRADE: closing costs for this symbol are not established, so no budget "
+                "comparison here can account for the exit. Supply: "
+                f"{cost.missing_inputs_message()}. Nothing is assumed to be zero. Existing "
+                "positions are still managed."
             )
 
         # 3. The broker's own volume rules.
@@ -1592,6 +1926,16 @@ class GridEngine:
         self._entries_paused = bool(saved.get("entries_paused", False))
         self._pause_reason = saved.get("pause_reason")
 
+        # The liquidation policy is protective state, so it comes back with the
+        # rest of it. A restart is exactly when a late fill from before the crash
+        # is waiting to be found.
+        policy = LiquidationPolicy.from_dict(saved.get("liquidation"))
+        if policy is not None:
+            self._liquidation = policy
+            logger.warning("restored a liquidation policy (%s): %s — this bot's exposure "
+                           "stays at zero until an explicit resume",
+                           policy.cause, policy.reason)
+
     def _persist_risk_state(self) -> None:
         """Writes the state protection depends on.
 
@@ -1611,6 +1955,7 @@ class GridEngine:
             "awaiting_settlement": sorted(self._awaiting_settlement),
             "entries_paused": self._entries_paused,
             "pause_reason": self._pause_reason,
+            "liquidation": self._liquidation.as_dict() if self._liquidation else None,
         }
         try:
             db_module.save_risk(self._risk_key(), payload)
@@ -1880,21 +2225,77 @@ class GridEngine:
         it exists, which is the whole point: the previous realised-only reading
         let a basket sit at -$200 without moving the number at all.
         """
+        # Equity is read ONCE, and its readability is established before any
+        # arithmetic touches it. The drawdown line used to subtract it straight
+        # from the peak, so a broker that returned no equity raised a TypeError
+        # out of the protective cycle - the one place that must not raise.
+        equity = getattr(account, "equity", None)
+        equity_readable = isinstance(equity, (int, float)) and math.isfinite(equity)
+        if not equity_readable:
+            self._last_error = ("account equity is unreadable, so neither the capital floor "
+                                "nor the drawdown limit can be evaluated this cycle")
+            logger.warning(self._last_error)
+
         drawdown = 0.0
-        if self._equity_peak > 0:
-            drawdown = (self._equity_peak - account.equity) / self._equity_peak * 100
+        if self._equity_peak > 0 and equity_readable:
+            drawdown = (self._equity_peak - equity) / self._equity_peak * 100
 
         risk = self._day_risk(positions)
-        # The exit reserve is an UNVERIFIED estimate (see _estimated_exit_cost),
-        # so it is not used to bring a loss exit forward. The marked result is.
-        daily_reading = risk.marked_result
+        # `risk_reading` is the marked result minus the DEFENSIBLE closing cost,
+        # and equals the marked result exactly when no defensible cost exists. So
+        # this line includes a verified or owner-supplied exit cost in the trigger
+        # and still refuses to fire early on an unverified one.
+        #
+        # The case this fixes: marked -99.00 with a known 2.00 closing cost against
+        # a 100.00 limit. The money that would be left after closing is -101.00,
+        # past the limit, and the old reading of -99.00 did not fire.
+        daily_reading = risk.risk_reading
 
         reason = None
         cause = None
-        if self.max_daily_loss_usd > 0 and daily_reading <= -self.max_daily_loss_usd:
+
+        # The capital floor, as an ACTIVE trigger and not only an entry rule.
+        #
+        # Scope, stated because it decides what this can and cannot promise:
+        #
+        # * It is judged on ACCOUNT EQUITY, which is balance plus every floating
+        #   position on the account — including positions this bot does not own.
+        #   That is deliberate: the floor is a line under the ACCOUNT, and an
+        #   account does not stop being near its floor because the loss came
+        #   from somewhere else.
+        # * What it then does is bounded by ownership. It cancels and closes
+        #   what THIS BOT owns and latches entries. It never touches a manual
+        #   trade or another strategy's position, so if outside activity is what
+        #   pushed equity down, flattening this bot cannot restore the account —
+        #   it removes this bot's contribution and stops adding to the problem.
+        #   The halt reason says so, and the owner has to act on the rest.
+        # * It is a trigger, not a guaranteed final balance. A gap, a rejected
+        #   close or a broker that stops answering can all leave the account
+        #   below the floor after everything here has run.
+        # Fires only when there is something to protect. With nothing of this
+        # bot's open there is nothing to liquidate, and an account that is simply
+        # below the floor is already refused by admission with a visible reason —
+        # turning that into a persistent halt would lock a small account behind a
+        # manual reset for a breach its trading never caused.
+        owns_exposure = bool(positions or pendings)
+        if (self.capital_floor_usd > 0 and equity_readable and owns_exposure
+                and equity <= self.capital_floor_usd):
+            owned = len(positions) + len(pendings)
             reason = (
-                f"daily loss limit reached (marked {daily_reading:.2f} of {-self.max_daily_loss_usd:.2f}; "
-                f"settled {risk.settled_realized:.2f}, open mark change {risk.open_mark_change:.2f})"
+                f"capital floor reached (account equity {equity:.2f} at or below the "
+                f"{self.capital_floor_usd:.2f} floor). Closing the {owned} position(s) and "
+                f"order(s) this bot owns and standing down; equity includes any trade this "
+                f"bot does not own, and those are not touched."
+            )
+            cause = CAUSE_CAPITAL_FLOOR
+        elif self.max_daily_loss_usd > 0 and daily_reading <= -self.max_daily_loss_usd:
+            reserve_note = ("" if risk.exit_reserve is None else
+                            f", including a known {risk.exit_reserve:.2f} closing cost")
+            reason = (
+                f"daily loss limit reached (reading {daily_reading:.2f} of "
+                f"{-self.max_daily_loss_usd:.2f}; marked {risk.marked_result:.2f}, settled "
+                f"{risk.settled_realized:.2f}, open mark change {risk.open_mark_change:.2f}"
+                f"{reserve_note})"
             )
             cause = CAUSE_DAILY_LOSS
         elif self.max_equity_drawdown_percent > 0 and drawdown >= self.max_equity_drawdown_percent:
@@ -1907,7 +2308,12 @@ class GridEngine:
             # Already halted and no longer breaching. The halt still stands, and
             # any exposure it was meant to remove is still chased below.
             reason = self._halt_reason
-            cause = CAUSE_DAILY_LOSS if reason.startswith("daily loss") else CAUSE_DRAWDOWN
+            if reason.startswith("capital floor"):
+                cause = CAUSE_CAPITAL_FLOOR
+            elif reason.startswith("daily loss"):
+                cause = CAUSE_DAILY_LOSS
+            else:
+                cause = CAUSE_DRAWDOWN
 
         if self._halt_reason is None:
             self._halt_reason = reason
@@ -2256,6 +2662,26 @@ class GridEngine:
             ),
             "completed_grid_estimate": self._last_grid_estimate,
             "execution_timing": self._timing.report(),
+            # Separate measurements, separately labelled. Every one of these is an
+            # IN-PROCESS span from this machine's monotonic clock. None of them is
+            # a broker fill time, and none of them was observed against a real
+            # terminal.
+            "scheduling": {
+                "protective_poll_seconds": self.protective_poll_seconds,
+                "reporting_poll_seconds": self.reporting_poll_seconds,
+                "reporting_time_budget_ms": self.reporting_time_budget_ms,
+                "cadence_delay_ms": self._timing.stats("cadence_delay").as_dict(),
+                "protective_decision_ms": self._timing.stats("protective_tick").as_dict(),
+                "reporting_cycle_ms": self._timing.stats("reporting_tick").as_dict(),
+                "close_to_confirmed_flat_ms": self._timing.stats("close_to_confirmed_flat").as_dict(),
+                "reporting_deferrals": self._reporting_deferrals,
+                "reporting_overruns": self._reporting_overruns,
+                "reporting_in_cooldown": monotonic_ms() < self._reporting_cooldown_until_ms,
+                "note": ("in-process spans only. Broker acknowledgement and fill times are "
+                         "NOT measured here and require a real terminal."),
+            },
+            "liquidation_policy": self._liquidation.as_dict() if self._liquidation else None,
+            "closing_costs": self._closing_cost(self._safe_positions() or []).as_dict(),
             # The marked daily risk measure, alongside the realised cards below.
             # They are different quantities and are not expected to agree while
             # positions are open.

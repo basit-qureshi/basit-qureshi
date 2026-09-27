@@ -176,34 +176,185 @@ def test_a_completed_close_does_not_survive_a_restart_as_an_open_request(broker,
 
 # --- what retirement is FOR --------------------------------------------------
 
-def test_exposure_appearing_after_a_confirmed_close_is_managed_not_abandoned(broker, engine_factory):
-    """MANAGED, which is not the same as closed on sight.
+def test_exposure_appearing_after_a_basket_stop_is_liquidated_not_managed(broker, engine_factory):
+    """The policy this replaces, and why.
 
-    After a basket stop the engine is not halted — it is paused. A position that
-    appears afterwards is exposure it owns, so it must be marked, valued inside
-    the basket, and closed when a limit fires. Force-closing anything that turns
-    up would be a different bug. The halted case, where the exposure must go
-    immediately, is `test_a_halted_engine_still_closes_exposure_that_appears_afterwards`.
+    This test used to require the opposite: a late fill after a basket stop was
+    kept open and only closed if some other threshold fired. That was the
+    engine's behaviour, but it was not the instruction — "close and stop after
+    the loss limit" means the exposure goes, not that it is watched.
+
+    A confirmed close ends the close ATTEMPT. The loss stop leaves a standing
+    liquidation policy behind, and while it stands, exposure this bot owns is
+    cancelled and closed again.
     """
     e = engine_factory(**live())
     held = filled_basket(broker, e)
     e._open_close_intent("basket_stop", "basket stop hit (-41.00)")
     e._drive_close_intent(held, [])
     assert broker.get_open_positions("XAUUSD", magic=MAGIC) == []
-    assert e._halt_reason is None, "a basket stop pauses; it does not halt"
+    assert e._liquidation is not None, "a loss stop left no standing policy"
+    assert e._liquidation.cause == "basket_stop"
+    assert e._baskets_stopped == 1
+
+    late = broker.open_position(OrderSide.BUY, broker.price, magic=MAGIC)
+    assert broker.get_open_positions("XAUUSD", magic=MAGIC), "fixture: exposure must exist"
+
+    e._protective_tick()
+
+    assert broker.get_open_positions("XAUUSD", magic=MAGIC) == [], (
+        "a late fill survived an active liquidation policy"
+    )
+    assert e._entries_paused is True, "the latch was lifted by a cleanup"
+    assert e._liquidation.cleanups == 1
+    assert e._baskets_stopped == 1, "a cleanup was counted as another stopped basket"
+    assert late.ticket not in {p.ticket for p in broker.get_open_positions("XAUUSD")}
+
+
+def test_a_resting_order_that_appears_later_is_cancelled_too(broker, engine_factory):
+    e = engine_factory(**live())
+    held = filled_basket(broker, e)
+    e._open_close_intent("basket_stop", "basket stop hit (-41.00)")
+    e._drive_close_intent(held, [])
+
+    broker.place_pending_order("XAUUSD", PendingType.BUY_STOP, 0.01,
+                               broker.price + 5.0, "GRID", MAGIC)
+    assert orders(broker), "fixture: an order must be resting"
+
+    e._protective_tick()
+    assert orders(broker) == [], "a resting order survived the liquidation policy"
+
+
+def test_repeated_late_fills_are_each_cleaned_up_without_inflating_counts(broker, engine_factory):
+    e = engine_factory(**live())
+    held = filled_basket(broker, e)
+    e._open_close_intent("basket_stop", "basket stop hit (-41.00)")
+    e._drive_close_intent(held, [])
+
+    for expected in (1, 2, 3):
+        broker.open_position(OrderSide.BUY, broker.price, magic=MAGIC)
+        e._protective_tick()
+        assert broker.get_open_positions("XAUUSD", magic=MAGIC) == []
+        assert e._liquidation.cleanups == expected
+    assert e._baskets_stopped == 1, "three cleanups became three stopped baskets"
+
+
+def test_a_rejected_cleanup_keeps_trying(broker, engine_factory, monkeypatch):
+    e = engine_factory(**live())
+    held = filled_basket(broker, e)
+    e._open_close_intent("basket_stop", "basket stop hit (-41.00)")
+    e._drive_close_intent(held, [])
+
+    broker.open_position(OrderSide.BUY, broker.price, magic=MAGIC)
+    real_close = broker.close_position
+    monkeypatch.setattr(broker, "close_position",
+                        lambda t: (_ for _ in ()).throw(RuntimeError("rejected")))
+    e._protective_tick()
+    assert broker.get_open_positions("XAUUSD", magic=MAGIC), "fixture: the close must fail"
+    assert e._close_intent is not None and not e._close_intent.finished, (
+        "an unconfirmed cleanup was retired"
+    )
+
+    monkeypatch.setattr(broker, "close_position", real_close)
+    e._protective_tick()
+    assert broker.get_open_positions("XAUUSD", magic=MAGIC) == [], (
+        "the cleanup did not retry once the broker recovered"
+    )
+
+
+def test_the_policy_survives_a_restart_and_still_cleans_up(broker, engine_factory):
+    e = engine_factory(**live())
+    held = filled_basket(broker, e)
+    e._open_close_intent("basket_stop", "basket stop hit (-41.00)")
+    e._drive_close_intent(held, [])
+    assert e._liquidation is not None
+
+    broker.open_position(OrderSide.BUY, broker.price, magic=MAGIC)
+    fresh = engine_factory(**live())          # the backend restarts
+    assert fresh._liquidation is not None, "the policy did not survive the restart"
+    assert fresh._liquidation.cause == "basket_stop"
+
+    fresh._protective_tick()
+    assert broker.get_open_positions("XAUUSD", magic=MAGIC) == [], (
+        "a restarted engine ignored exposure under an active liquidation policy"
+    )
+    assert fresh._entries_paused is True
+
+
+def test_only_an_explicit_resume_clears_the_policy(broker, engine_factory):
+    e = engine_factory(**live())
+    held = filled_basket(broker, e)
+    e._open_close_intent("basket_stop", "basket stop hit (-41.00)")
+    e._drive_close_intent(held, [])
+
+    # A price recovery and several quiet cycles change nothing.
+    broker.price += 20.0
+    for _ in range(3):
+        broker.next_candle()
+        e._tick()
+    assert e._liquidation is not None, "the policy lapsed on its own"
+    assert orders(broker) == [], "a grid was placed under an active policy"
+
+    ok, message = e.resume_entries()
+    assert ok, message
+    assert e._liquidation is None
+    assert e._entries_paused is False
+
+
+def test_resume_is_refused_while_owned_exposure_is_still_open(broker, engine_factory):
+    e = engine_factory(**live())
+    held = filled_basket(broker, e)
+    e._open_close_intent("basket_stop", "basket stop hit (-41.00)")
+    e._drive_close_intent(held, [])
+    broker.open_position(OrderSide.BUY, broker.price, magic=MAGIC)
+
+    ok, message = e.resume_entries()
+    assert ok is False
+    assert "still open" in message and "liquidation policy" in message
+    assert e._liquidation is not None
+
+
+def test_a_profit_close_leaves_no_liquidation_policy(broker, engine_factory):
+    """The distinction that must not collapse: a profit exit is not a loss stop."""
+    e = engine_factory(**live(basket_take_profit_usd=10.0))
+    profitable_basket(broker, e)
+
+    assert e._baskets_won >= 1
+    assert e._liquidation is None, "a profit exit left a liquidation policy behind"
+    assert e._entries_paused is False
+
+
+def test_late_exposure_after_a_profit_close_is_managed_not_liquidated(broker, engine_factory):
+    """No policy stands, so this exposure is marked and managed under the limits."""
+    e = engine_factory(**live(basket_take_profit_usd=10.0))
+    profitable_basket(broker, e)
+    assert e._liquidation is None
 
     late = broker.open_position(OrderSide.BUY, broker.price, magic=MAGIC)
     e._protective_tick()
-
-    assert late.ticket in e._last_marks, "the position was not even being marked"
+    assert late.ticket in e._last_marks, "the position was not being marked"
     assert broker.get_open_positions("XAUUSD", magic=MAGIC), (
-        "a position at no loss was closed on sight"
+        "a position at no loss was liquidated after a PROFIT close"
     )
 
-    broker.price -= 70.0                      # now it is past the basket stop
+    broker.price -= 70.0                      # now past the basket stop
     e._protective_tick()
-    assert broker.get_open_positions("XAUUSD", magic=MAGIC) == [], (
-        "owned exposure went past the basket stop and was not closed"
+    assert broker.get_open_positions("XAUUSD", magic=MAGIC) == []
+
+
+def test_an_ordinary_pause_does_not_liquidate(broker, engine_factory):
+    """Pause stops new entries and keeps managing what is open. That is all."""
+    e = engine_factory(**live())
+    filled_basket(broker, e)
+    open_before = broker.get_open_positions("XAUUSD", magic=MAGIC)
+    assert open_before, "fixture: a basket must be open"
+
+    e.pause_entries("owner paused to read the panel")
+    e._protective_tick()
+
+    assert e._liquidation is None, "an ordinary pause created a liquidation policy"
+    assert broker.get_open_positions("XAUUSD", magic=MAGIC), (
+        "pause closed positions it was only supposed to stop adding to"
     )
 
 

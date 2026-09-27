@@ -384,3 +384,229 @@ def test_protection_over_preexisting_exposure_needs_no_admission(broker, engine_
     assert broker.get_open_positions("XAUUSD", magic=MAGIC) == [], (
         "the engine refused to manage exposure it already owned"
     )
+
+
+# --- D8: the capital floor as an ACTIVE trigger, not only an entry rule -------
+#
+# Reviewer's reproduction: balance 1000, floor 950, basket stop 100, daily limit
+# 200. Admission passed, a position took equity to 940, and a protective cycle
+# left it open with no halt. The floor participated in admission and in nothing
+# else, while the constructor described it as a line the account is never traded
+# below. Those were two different contracts.
+
+
+def under_the_floor(broker, engine_factory, **over):
+    """A bot position that takes ACCOUNT EQUITY below the floor."""
+    from app.brokers.base import OrderSide
+
+    kw = dict(capital_floor_usd=950.0, basket_stop_loss_usd=100.0,
+              max_daily_loss_usd=200.0, basket_take_profit_usd=10_000.0)
+    kw.update(over)
+    broker.balance = 1000.0
+    e = engine_factory(**kw)
+    e._protective_tick()
+    broker.open_position(OrderSide.BUY, broker.price, magic=MAGIC)
+    broker.price -= 60.0                      # one 0.01 lot -> about -60.00
+    account = broker.get_account_info()
+    assert account.equity < kw["capital_floor_usd"], "fixture: equity must breach the floor"
+    return e
+
+
+def test_a_floor_breach_closes_owned_exposure_and_latches(broker, engine_factory):
+    e = under_the_floor(broker, engine_factory)
+    e._protective_tick()
+
+    assert e._halt_reason is not None and "capital floor" in e._halt_reason
+    assert broker.get_open_positions("XAUUSD", magic=MAGIC) == [], (
+        "the floor was breached and this bot's exposure stayed open"
+    )
+    assert e._entries_paused is True
+    allowed, reason = e._entry_gate(broker.get_account_info())
+    assert allowed is False and reason.startswith("HALTED"), reason
+
+
+def test_a_floor_halt_is_written_down_before_the_close_is_attempted(broker, engine_factory,
+                                                                   monkeypatch):
+    """A crash mid-liquidation must not lose the reason."""
+    from app import db as db_module
+
+    e = under_the_floor(broker, engine_factory)
+    monkeypatch.setattr(broker, "close_position",
+                        lambda t: (_ for _ in ()).throw(RuntimeError("rejected")))
+    e._protective_tick()
+
+    saved = db_module.load_risk(e._risk_key()) or {}
+    assert "capital floor" in (saved.get("halt_reason") or ""), (
+        "the halt reason was not persisted before the close was attempted"
+    )
+    assert broker.get_open_positions("XAUUSD", magic=MAGIC), "fixture: the close must fail"
+
+
+def test_a_floor_halt_keeps_trying_and_survives_a_restart(broker, engine_factory, monkeypatch):
+    e = under_the_floor(broker, engine_factory)
+    real_close = broker.close_position
+    monkeypatch.setattr(broker, "close_position",
+                        lambda t: (_ for _ in ()).throw(RuntimeError("rejected")))
+    e._protective_tick()
+    assert broker.get_open_positions("XAUUSD", magic=MAGIC)
+
+    fresh = engine_factory(capital_floor_usd=950.0, basket_stop_loss_usd=100.0,
+                           max_daily_loss_usd=200.0, basket_take_profit_usd=10_000.0)
+    assert fresh._halt_reason is not None, "the floor halt did not survive the restart"
+    monkeypatch.setattr(broker, "close_position", real_close)
+    fresh._protective_tick()
+    assert broker.get_open_positions("XAUUSD", magic=MAGIC) == [], (
+        "the restarted engine did not finish the liquidation"
+    )
+
+
+def test_a_late_fill_after_a_floor_halt_is_closed_too(broker, engine_factory):
+    from app.brokers.base import OrderSide
+
+    e = under_the_floor(broker, engine_factory)
+    e._protective_tick()
+    assert broker.get_open_positions("XAUUSD", magic=MAGIC) == []
+
+    broker.open_position(OrderSide.BUY, broker.price, magic=MAGIC)
+    e._protective_tick()
+    assert broker.get_open_positions("XAUUSD", magic=MAGIC) == [], (
+        "a late fill survived a capital floor halt"
+    )
+    assert e._entries_paused is True
+
+
+def test_a_floor_breach_never_touches_a_trade_this_bot_does_not_own(broker, engine_factory):
+    """Equity is an ACCOUNT number; ownership still bounds what may be closed."""
+    from app.brokers.base import OrderSide
+
+    # A BUY, not a SELL: a manual SELL would GAIN as the price falls and net the
+    # owned loss back to zero, and the fixture would not breach the floor at all.
+    manual = broker.open_position(OrderSide.BUY, broker.price, magic=555777)
+    e = under_the_floor(broker, engine_factory)
+    e._protective_tick()
+
+    assert broker.get_open_positions("XAUUSD", magic=MAGIC) == []
+    surviving = {p.ticket for p in broker.get_open_positions("XAUUSD")}
+    assert manual.ticket in surviving, "the floor halt closed a manual trade"
+
+
+def test_outside_losses_can_trigger_the_floor_and_the_reason_says_so(broker, engine_factory):
+    """A manual position pushes equity under the floor.
+
+    The bot cannot repair that: it removes its OWN exposure and stands down. The
+    reason has to say that, or the owner will read a flat bot as a fixed account.
+    """
+    from app.brokers.base import OrderSide
+
+    broker.balance = 1000.0
+    e = engine_factory(capital_floor_usd=950.0, basket_stop_loss_usd=100.0,
+                       max_daily_loss_usd=200.0, basket_take_profit_usd=10_000.0)
+    e._protective_tick()
+    broker.open_position(OrderSide.BUY, broker.price, magic=MAGIC)       # small, owned
+    manual = broker.open_position(OrderSide.BUY, broker.price, magic=999111, volume=0.05)
+    broker.price -= 20.0        # owned -20, manual -100 -> equity about 880
+
+    account = broker.get_account_info()
+    assert account.equity < 950.0
+    e._protective_tick()
+
+    assert e._halt_reason is not None and "capital floor" in e._halt_reason
+    assert "does not own" in e._halt_reason, "the reason does not state the ownership limit"
+    assert broker.get_open_positions("XAUUSD", magic=MAGIC) == []
+    assert manual.ticket in {p.ticket for p in broker.get_open_positions("XAUUSD")}
+    # The account is STILL under the floor, and the bot says so rather than
+    # implying it fixed anything.
+    assert broker.get_account_info().equity < 950.0
+
+
+def test_an_unreadable_equity_is_reported_rather_than_silently_skipped(broker, engine_factory,
+                                                                      monkeypatch):
+    from app.brokers.base import OrderSide
+
+    e = under_the_floor(broker, engine_factory)
+    real = broker.get_account_info
+
+    def no_equity(*a, **k):
+        account = real(*a, **k)
+        account.equity = None
+        return account
+
+    monkeypatch.setattr(broker, "get_account_info", no_equity)
+    e._protective_tick()
+    assert "equity is unreadable" in (e._last_error or ""), (
+        "an unreadable equity silently skipped the floor check"
+    )
+
+
+def test_the_floor_with_no_exposure_refuses_entry_instead_of_halting(broker, engine_factory):
+    """Nothing to liquidate means nothing to liquidate.
+
+    An account below the floor with none of this bot's exposure open is refused
+    by admission with a visible reason. Turning that into a persistent halt would
+    lock a small account behind a manual reset for a breach its trading never
+    caused.
+    """
+    broker.balance = 24.67
+    e = engine_factory(basket_stop_loss_usd=10.0)     # fixture floor is 50.00
+    e._tick()
+    broker.next_candle()
+    e._tick()
+
+    assert e._halt_reason is None, "a halt was raised with nothing open"
+    status = e.status()
+    assert status["entry_blocked"] is True
+    assert "capital floor" in (status["entry_block_reason"] or "")
+    assert orders(broker) == []
+
+
+# --- D9: decision values must not arrive pre-rounded --------------------------
+
+class RawPosition:
+    """A position whose net is deliberately just under a cent boundary."""
+
+    def __init__(self, net: float, ticket: str = "raw-1"):
+        self.profit, self.swap, self.commission = net, 0.0, 0.0
+        self.volume, self.ticket, self.identifier = 0.01, ticket, None
+        self.costs_known, self.side = True, None
+
+    @property
+    def net_profit(self) -> float:
+        return self.profit + self.swap + self.commission
+
+
+def test_the_target_is_judged_on_unrounded_money_through_the_real_caller(broker, engine_factory):
+    """Reviewer's case: net 9.996 against a 10.00 target, zero exit reserve.
+
+    The direct helper always answered this correctly. Its live caller handed it
+    a value `_basket_pnl` had already rounded to 10.00, so the composition
+    crossed a target the money had not. The regression goes through the
+    composition, not the helper alone.
+    """
+    e = engine_factory(basket_take_profit_usd=10.0, basket_stop_loss_usd=60.0)
+    positions = [RawPosition(9.996)]
+
+    net, gross, known = e._basket_pnl(positions)
+    assert net == 9.996, "the decision path received a rounded figure"
+    assert e._profit_target_met(positions, net, known, 0.0) is False, (
+        "9.996 was treated as having cleared a 10.00 target"
+    )
+
+    # And the display boundary still rounds.
+    assert e._basket_pnl_display(positions)[0] == 10.0
+
+
+def test_a_basket_that_genuinely_clears_the_target_still_closes(broker, engine_factory):
+    e = engine_factory(basket_take_profit_usd=10.0, basket_stop_loss_usd=60.0)
+    positions = [RawPosition(10.004)]
+    net, _gross, known = e._basket_pnl(positions)
+    assert e._profit_target_met(positions, net, known, 0.0) is True
+
+
+def test_the_basket_stop_is_judged_on_unrounded_money_too(broker, engine_factory):
+    """-59.996 against a 60.00 stop has not reached it."""
+    e = engine_factory(basket_take_profit_usd=1000.0, basket_stop_loss_usd=60.0)
+    net, gross, _known = e._basket_pnl([RawPosition(-59.996)])
+    assert min(net, gross) == -59.996
+    assert min(net, gross) > -e.basket_stop_loss_usd, (
+        "a rounded reading would have fired the stop early"
+    )

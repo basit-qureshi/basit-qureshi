@@ -50,6 +50,10 @@ def live(**kw):
     kw.setdefault("basket_stop_loss_usd", 60.0)
     kw.setdefault("max_daily_loss_usd", 100.0)
     kw.setdefault("basket_take_profit_usd", 10_000.0)
+    # The double charges neither, and an unknown closing cost now blocks new
+    # exposure — the shadow engine is built directly, so it states them itself.
+    kw.setdefault("exit_commission_per_lot", 0.0)
+    kw.setdefault("slippage_points_per_fill", 0.0)
     return kw
 
 

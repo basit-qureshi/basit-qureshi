@@ -50,7 +50,7 @@ cd C:\Users\Home\Documents\basit-qureshi\backend
 .\venv\Scripts\python.exe -m pip install -r requirements.txt -r requirements-mt5.txt
 .\venv\Scripts\python.exe -m pytest -q
 ```
-Expect **404 passed**. Anything else, stop and send the output.
+Expect **477 passed**. Anything else, stop and send the output.
 
 ```powershell
 cd C:\Users\Home\Documents\basit-qureshi\frontend
@@ -356,6 +356,28 @@ Record the session while you do this — §F.
 ## E. Decisions needed before any forward evaluation can start
 
 These are yours. They are not values to invent.
+
+> **Since the independent review, two things changed for you.**
+>
+> **1. The capital floor now acts, not only refuses.** If account equity reaches
+> it while this bot owns positions or orders, the bot cancels and closes **what it
+> owns**, latches entries, and holds its exposure at zero until you resume. Equity
+> includes trades this bot does not own, so a manual loss can trigger it — and
+> flattening this bot cannot repair that; it removes its own contribution and
+> stands down. With nothing of its own open the floor is an entry refusal only.
+> It is a trigger, not a guaranteed final balance.
+>
+> **2. Closing costs must be stated or new entries are blocked.** Three new
+> settings, all UNKNOWN by default and never assumed to be zero:
+>
+> | Setting | Where to get it |
+> | --- | --- |
+> | `EXIT_COMMISSION_PER_LOT_USD` | your contract specification or an account statement |
+> | `SLIPPAGE_POINTS_PER_FILL` | slippage you have actually observed on this symbol |
+> | `BROKER_PROFIT_INCLUDES_EXIT_SPREAD` | whether MT5's floating profit for your broker is already struck at the closing side. Leave `unverified` until you have checked — while unverified, the exit spread can delay a profit exit but cannot fire a loss exit early |
+>
+> Existing positions stay protected either way; this gate only governs new
+> baskets. A read-only tick export (§B1) does not depend on any of it.
 
 | Decision | Currently | Note |
 | --- | --- | --- |

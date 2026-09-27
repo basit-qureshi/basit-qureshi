@@ -132,6 +132,8 @@ class MockBroker(BrokerAdapter):
             min_volume=0.01,
             volume_step=0.01,
             spread=spread,
+            # A fact about this double: its profit is price movement only.
+            profit_includes_exit_spread=False,
         )
 
     def _ensure_history(self, symbol: str, count: int) -> None:

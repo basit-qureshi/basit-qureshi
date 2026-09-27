@@ -363,7 +363,7 @@ async def get_open_trades():
         })
     items.sort(key=lambda i: i["net_profit"])
 
-    net, gross, costs_known = engine._basket_pnl(positions)
+    net, gross, costs_known = engine._basket_pnl_display(positions)
     exit_cost = engine._estimated_exit_cost(positions)
     return {
         "connected": True,

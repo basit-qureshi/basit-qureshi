@@ -118,8 +118,11 @@ class FakeBroker(BrokerAdapter):
         return round(self._margin_for(volume, price), 2)
 
     def get_symbol_info(self, symbol):
+        # profit_includes_exit_spread=False is a FACT about this double: its
+        # `_profit` is price movement only, so a closing spread is not inside it.
         return SymbolInfo(symbol, POINT, VALUE_PER_POINT_PER_LOT, 0.01, 0.01,
-                          min_stop_distance=0.0, spread=self.spread)
+                          min_stop_distance=0.0, spread=self.spread,
+                          profit_includes_exit_spread=False)
 
     def get_candles(self, symbol, timeframe, count):
         if not self.candles_available:
@@ -245,6 +248,11 @@ def engine_factory(broker):
         # double supplies one; tests that check the requirement itself pass
         # capital_floor_usd=0.0 explicitly.
         kw.setdefault("capital_floor_usd", 50.0)
+        # Closing costs the DOUBLE actually charges: none. Stated rather than
+        # defaulted, because an unknown closing cost now blocks new exposure and
+        # a test that silently inherited "unknown" would be testing that instead.
+        kw.setdefault("exit_commission_per_lot", 0.0)
+        kw.setdefault("slippage_points_per_fill", 0.0)
         return GridEngine(broker=broker, symbol="XAUUSD", mode="demo", **kw)
 
     return _make

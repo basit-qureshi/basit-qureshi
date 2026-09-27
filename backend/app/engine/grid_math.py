@@ -24,6 +24,7 @@ number from the same arithmetic.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 #: What the estimate deliberately does not include. Stated once, here, so the
@@ -108,6 +109,11 @@ class Estimate:
     fills: int
     total_volume: float
     excluded: tuple = field(default=EXCLUDED_FROM_ESTIMATE)
+    #: False when the symbol specification could not price anything. A total of
+    #: 0.00 from an unpriceable symbol is not a cheap grid, and a caller that
+    #: reads `total` without reading this would treat it as one.
+    valid: bool = True
+    problem: str | None = None
 
     @property
     def widest_level_distance(self) -> float:
@@ -142,11 +148,19 @@ def completed_grid_estimate(price: float, grid: GridSpec, symbol: SymbolSpec) ->
     decides what an unknown means. `_entry_gate` refuses on unknowns elsewhere.
     """
     buys, sells = grid_levels(price, grid, symbol)
-    if not symbol.pip_size:
+    problem = None
+    if not symbol.pip_size or not math.isfinite(symbol.pip_size):
+        problem = "the symbol's point size is unknown, so no price movement can be valued"
+    elif not symbol.pip_value_per_lot or not math.isfinite(symbol.pip_value_per_lot):
+        problem = ("the value of one point per lot is unknown, so this grid's exposure "
+                   "cannot be priced in account currency")
+    elif not math.isfinite(price) or price <= 0:
+        problem = f"the reference price is unusable ({price!r})"
+    if problem is not None:
         return Estimate(total=0.0, displacement_cost=0.0, entry_spread_cost=0.0,
                         first_step=max(grid.distance, symbol.min_stop_distance),
                         buy_levels=buys, sell_levels=sells, fills=0,
-                        total_volume=0.0, reference=price)
+                        total_volume=0.0, reference=price, valid=False, problem=problem)
 
     point, per_point = symbol.pip_size, symbol.pip_value_per_lot
     displacement = 0.0

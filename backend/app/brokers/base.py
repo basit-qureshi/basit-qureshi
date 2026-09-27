@@ -114,6 +114,35 @@ class SymbolInfo:
     #: The multiple used above, so a reader does not have to divide to find it.
     app_spread_multiple: float = 0.0
 
+    # --- is this specification usable at all? ---------------------------------
+    #: False when a value the money maths needs could not be established. The
+    #: adapter used to substitute 1.0 for a missing tick value, which turned "we
+    #: do not know what a point is worth" into "a point is worth one unit" — and
+    #: every downstream figure inherited that invention silently.
+    valuation_ok: bool = True
+    #: Why not, one string per problem. Empty when `valuation_ok`.
+    valuation_problems: tuple = ()
+    #: Whether a quote was obtained at all. A missing quote is NOT a zero spread:
+    #: a genuinely observed zero spread is possible on some feeds, and the two
+    #: must not collapse into the same number.
+    quote_available: bool = True
+    spread_available: bool = True
+
+    @property
+    def usable_for_new_exposure(self) -> bool:
+        """Enough is known to price a new grid honestly."""
+        return self.valuation_ok and self.spread_available
+
+    def valuation_report(self) -> dict:
+        return {
+            "valuation_ok": self.valuation_ok,
+            "valuation_problems": list(self.valuation_problems),
+            "quote_available": self.quote_available,
+            "spread_available": self.spread_available,
+            "pip_size": self.pip_size,
+            "pip_value_per_lot": self.pip_value_per_lot,
+        }
+
     @property
     def stop_distance_binding(self) -> str:
         """Which input is actually setting the first grid step."""

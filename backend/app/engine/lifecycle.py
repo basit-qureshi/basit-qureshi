@@ -21,11 +21,28 @@ CAUSE_PROFIT = "profit_target"
 CAUSE_BASKET_STOP = "basket_stop"
 CAUSE_DAILY_LOSS = "daily_loss"
 CAUSE_DRAWDOWN = "equity_drawdown"
+CAUSE_CAPITAL_FLOOR = "capital_floor"
 CAUSE_OWNER = "owner_request"
+#: A cleanup run by an active liquidation policy, not a basket ending. Counted
+#: separately so repeated cleanups cannot inflate the stopped-basket tally.
+CAUSE_LIQUIDATION = "liquidation_policy"
 
 # Causes that latch: after these, no new basket may start until the owner acts.
 # A loss exit that silently rebuilt would turn one breach into a series of them.
-LATCHING_CAUSES = frozenset({CAUSE_BASKET_STOP, CAUSE_DAILY_LOSS, CAUSE_DRAWDOWN, CAUSE_OWNER})
+LATCHING_CAUSES = frozenset({CAUSE_BASKET_STOP, CAUSE_DAILY_LOSS, CAUSE_DRAWDOWN,
+                             CAUSE_CAPITAL_FLOOR, CAUSE_OWNER, CAUSE_LIQUIDATION})
+
+#: Causes that leave a DURABLE liquidation policy behind once their close
+#: confirms. A completed close attempt is not the end of the decision: while one
+#: of these is in force, exposure this bot owns that turns up afterwards is
+#: cancelled and closed again, not merely managed. The policy is cleared by an
+#: explicit owner resume, never by a successful close.
+#:
+#: A profit exit is deliberately absent: it is not a loss stop, and it permits a
+#: replacement. An ordinary pause is absent too — it stops new entries and keeps
+#: managing what is open, which is a different instruction.
+LIQUIDATING_CAUSES = frozenset({CAUSE_BASKET_STOP, CAUSE_DAILY_LOSS, CAUSE_DRAWDOWN,
+                                CAUSE_CAPITAL_FLOOR, CAUSE_OWNER})
 
 STATE_CLOSING = "CLOSING"          # cancelling orders and closing positions
 STATE_RECONCILING = "RECONCILING"  # closes attempted, confirming nothing survived
@@ -50,6 +67,10 @@ class CloseIntent:
     # Set once the basket has been counted in the won/stopped tallies, so a
     # retry loop cannot count the same basket several times.
     counted: bool = False
+    #: False for a cleanup ordered by a liquidation policy. Such a close ends no
+    #: basket — the basket already ended — so counting it would inflate the
+    #: stopped tally once per late fill.
+    counts_basket: bool = True
     # Final realised figure, filled in when settlement arrives. None until then;
     # never zero as a placeholder.
     realized_net: float | None = None
@@ -72,6 +93,7 @@ class CloseIntent:
             "state": self.state,
             "attempts": self.attempts,
             "counted": self.counted,
+            "counts_basket": self.counts_basket,
             "realized_net": self.realized_net,
             "last_error": self.last_error,
             "latches_entries": self.latches_entries,
@@ -82,6 +104,46 @@ class CloseIntent:
         if not isinstance(data, dict) or not data.get("cause"):
             return None
         known = {f for f in cls.__dataclass_fields__ if f != "latches_entries"}
+        return cls(**{k: v for k, v in data.items() if k in known})
+
+
+@dataclass
+class LiquidationPolicy:
+    """A standing instruction to hold this bot's exposure at zero.
+
+    The distinction this exists to make: a close INTENT is one attempt to flatten
+    what is open, and it finishes. A liquidation POLICY is the decision that
+    followed a loss limit, and it does not finish when a close succeeds. While it
+    is in force, any exposure this bot owns that appears afterwards - a late fill,
+    an order that survived cancellation, anything carrying its magic number - is
+    cancelled and closed again.
+
+    It is cleared by an explicit owner resume and by nothing else. Not by a
+    successful close, not by a price recovery, not by a new trading day, and not
+    by a restart: it is persisted with the rest of the protective state.
+
+    Ownership is unchanged by it. A position belonging to another strategy or
+    opened by hand is never touched, whatever the policy says.
+    """
+
+    cause: str
+    reason: str
+    since_utc: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    #: How many times exposure has had to be cleaned up since the policy began.
+    #: A number above zero is worth reading: it means fills kept arriving after
+    #: the basket was supposed to be finished.
+    cleanups: int = 0
+    last_error: str | None = None
+
+    def as_dict(self) -> dict:
+        return {"cause": self.cause, "reason": self.reason, "since_utc": self.since_utc,
+                "cleanups": self.cleanups, "last_error": self.last_error}
+
+    @classmethod
+    def from_dict(cls, data) -> "LiquidationPolicy | None":
+        if not isinstance(data, dict) or not data.get("cause"):
+            return None
+        known = {f for f in cls.__dataclass_fields__}
         return cls(**{k: v for k, v in data.items() if k in known})
 
 

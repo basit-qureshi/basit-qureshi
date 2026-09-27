@@ -80,6 +80,12 @@ class Settings(BaseSettings):
     # History, settlement, chart data and the websocket frame. Slower on
     # purpose, and skipped rather than queued when protective work is waiting.
     reporting_poll_seconds: float = 5.0
+
+    # How long one reporting cycle may take before it defers the rest of its work
+    # to a later cycle, in milliseconds. Reporting runs on the same loop as
+    # protection, so this bounds how long protection can be kept waiting by
+    # anything other than a broker call already in flight.
+    reporting_time_budget_ms: float = 400.0
     # How long a single broker call may be in flight before the bot reports
     # itself blocked and refuses new exposure. It never cancels or duplicates
     # the call - a synchronous terminal call cannot be cancelled by a thread.
@@ -97,6 +103,21 @@ class Settings(BaseSettings):
     # zone, so they are read as UTC and converted here; set this to your
     # broker's zone if its day should roll over at a different hour.
     timezone: str = "Asia/Karachi"
+
+    # --- closing costs: YOUR broker's figures, or UNKNOWN -------------------
+    # These are not defaulted to zero. Left unset they are UNKNOWN, and an
+    # unknown closing cost blocks NEW exposure while existing exposure stays
+    # protected. Nothing here is invented for you.
+    #: Commission the CLOSING side charges, per lot, in account currency. From
+    #: your contract specification or an account statement.
+    exit_commission_per_lot_usd: float | None = None
+    #: Slippage you have actually OBSERVED on this symbol, in points per fill.
+    slippage_points_per_fill: float | None = None
+    #: Whether your broker's floating profit is already struck at the executable
+    #: closing side. "unverified" until you have checked; "yes" or "no" after.
+    #: While it is unverified the exit spread can delay a profit exit but cannot
+    #: bring a loss exit forward.
+    broker_profit_includes_exit_spread: str = "unverified"
 
     database_url: str = "sqlite:///./trading_bot.db"
 
