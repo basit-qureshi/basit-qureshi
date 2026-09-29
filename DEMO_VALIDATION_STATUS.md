@@ -14,8 +14,8 @@ integration, evidence, connected verification and activation.
 
 | Question | Answer |
 | --- | --- |
-| Do the **offline checks** pass? | **Yes.** 477 backend tests, 4 frontend tests, lint clean, build clean, and a fixture dry-run that records a full session and exports it. Offline, against fake brokers — see §7.8 for what that does and does not establish. |
-| Is a **demo session ready to run**? | **Prepared, not authorized to start.** The collector, the export and the procedure exist. It is blocked on three owner risk numbers (`OWNER_RUNBOOK.md` §E). |
+| Do the **offline checks** pass? | **Yes.** 494 backend tests, 4 frontend tests, lint clean, build clean, and a fixture dry-run that records a full session and exports it. Offline, against fake brokers — see §7.8 for what that does and does not establish. |
+| Is a **demo session ready to run**? | **Yes — the owner can run one now.** `OWNER_RUNBOOK.md` §D0 is the step-by-step path, and `tools/demo_preflight.py` reads the owner's own terminal to produce the settings still needed. It places no orders and refuses a real account. |
 | Has an **actual session occurred**? | **No.** Zero sessions recorded. Zero demo trades. Zero live trades. |
 | Is **profitability supported**? | **No. Trading performance is not measured.** There is no market data and no session data, so there is nothing to measure it from. |
 
@@ -739,3 +739,103 @@ no market data exists, and no session has been recorded. The figures 37.80, 46.2
 and 52.80 remain conditional arithmetic for one scenario, not maximum losses.
 **Profitability is still not measured**, and 477 passing offline tests are not
 evidence of a trading edge.
+
+---
+
+## 10. Demo readiness — what was added so the owner can actually run one
+
+The owner is running on **demo**, not real money, and asked for the remaining
+work to be finished so a demo test is possible. Demo is the right place to find
+out: it costs nothing and it is the only way to see the machinery against a real
+terminal. This section is what that took.
+
+### 10.1 The real blocker was not code, it was six unset numbers
+
+Six settings had no value and each one blocks new entries by design:
+the basket stop, the daily loss limit, the capital floor, the exit commission,
+the slippage assumption, and whether the broker's floating profit already
+includes the exit spread. Three are the owner's risk tolerance. Three are facts
+about their broker that nobody had measured.
+
+Telling the owner to "go and find six numbers" is not a deliverable, so
+`tools/demo_preflight.py` now reads their terminal and produces them.
+
+### 10.2 `tools/demo_preflight.py`
+
+One read-only command. It cannot trade: there is no order call in the file, it
+imports nothing from `app.engine.grid_engine`, and it writes no setting. Verified
+by 17 tests (`tests/test_demo_preflight.py`) against a fake terminal — including
+that the source contains no `order_send`, and that only read-only MT5 calls are
+made.
+
+What it reports, with the owner's own numbers:
+
+| Section | What it establishes |
+| --- | --- |
+| Account | the **broker's** demo/real/contest classification, and whether `ACCOUNT_TYPE` disagrees with it |
+| Symbol | selectable, point size, what one point on one lot is worth, live spread |
+| First-level distance | the broker's declared minimum, this app's buffer, this app's spread multiple, and **which one is binding** |
+| Completed-grid estimate | the figure for **their** broker and configuration, with its exclusions restated |
+| Closing costs | commission per lot per side **measured from their own closed deals** |
+| Risk numbers | which are unset, and the minimum coherent with their grid |
+| Open exposure | what carries the bot's magic number, and what does not and never will be touched |
+
+Then it prints the `.env` lines to add. A value the owner must decide appears in
+`<angle brackets>` and is never filled in, and no line raises a limit to make a
+check pass.
+
+**It refuses a REAL account** and stops before reading anything else — the one
+mistake that costs real money is the one it is hardest to undo.
+
+**Two honest defaults it states rather than hides:**
+
+- if there are no closed deals yet, it does **not** assume zero commission. It
+  says to place one manual trade by hand, close it, and run again — then the
+  figure comes from the account
+- if `BROKER_PROFIT_INCLUDES_EXIT_SPREAD` is unknown, it recommends `no`, and
+  says why that is the conservative side: a bigger grid estimate, a harder profit
+  target, and a loss exit that fires slightly sooner. It can only make the bot
+  stricter
+
+### 10.3 Two defects found while building it
+
+| Defect | Found how | Fix |
+| --- | --- | --- |
+| The pre-flight **crashed with a traceback** when the terminal had no quote: it printed "no usable quote" and then asked for the price anyway. A pre-flight that raises is useless exactly when something is wrong | its own test, `test_a_missing_quote_stops_it` | the price read is guarded; a missing quote ends with a clean NOT READY verdict |
+| The test stub treated `quote=None` as "not specified" and handed the no-quote case a healthy quote, so that test was passing for the wrong reason | the failure above did not reproduce | an explicit `UNSET` sentinel in the stub |
+
+### 10.4 The liquidation policy is now visible
+
+`StatusBar` shows it: **🛑 Holding exposure at zero after `<cause>` — N
+cleanup(s) since. Only Resume entries clears this.**
+
+It needed its own line because it outlives the close that satisfied it. Without
+it, a bot obediently closing every late fill looks like a bot stuck in a loop,
+and the owner is the only one who can lift it.
+
+### 10.5 `OWNER_RUNBOOK.md` §D0
+
+One section, six steps, in order: pre-flight → fill in the settings → start the
+backend → what to watch while it runs → how to stop safely → how to keep the
+record. The old §D is retained as the deeper fault-injection checklist for later.
+
+### 10.6 Verification
+
+```
+backend  python3 -m pytest -q                -> 494 passed
+backend  python3 -m compileall -q app tools  -> OK
+frontend npm test / lint / build             -> 4 passed / 0 errors / clean
+```
+
+### 10.7 What a demo run will and will not settle
+
+It **will** settle whether the machinery works against a real terminal: whether
+the grid it calculated is the grid it places, whether a close it reports is a
+close the broker confirmed, whether the dashboard matches MT5, whether a halt
+survives a restart.
+
+It will **not** settle whether the strategy makes money, and nothing here claims
+otherwise. The central risk — both sides filling and the basket freezing near the
+completed-grid estimate — has still never been measured on real price history.
+§B1's tick export remains the only thing that can answer that, and it is
+independent of the demo run: read-only, no orders, no risk settings needed.

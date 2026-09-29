@@ -50,7 +50,7 @@ cd C:\Users\Home\Documents\basit-qureshi\backend
 .\venv\Scripts\python.exe -m pip install -r requirements.txt -r requirements-mt5.txt
 .\venv\Scripts\python.exe -m pytest -q
 ```
-Expect **477 passed**. Anything else, stop and send the output.
+Expect **494 passed**. Anything else, stop and send the output.
 
 ```powershell
 cd C:\Users\Home\Documents\basit-qureshi\frontend
@@ -303,9 +303,125 @@ Do not restart blind over open exposure.
 
 ---
 
-## D. Controlled demo verification — PREPARED, NOT EXECUTED
+## D0. DEMO TEST — start to finish, in order
 
-Nothing below has been run. It needs the three risk numbers first (§E).
+This is the section to follow. Everything else in this file is reference.
+
+### Step 1 — pre-flight. Reads your terminal, places no orders.
+
+Open the MT5 terminal, log into the **demo** account, then one line:
+
+```powershell
+cd C:\Users\Home\Documents\basit-qureshi\backend; .\venv\Scripts\python.exe tools\demo_preflight.py
+```
+
+It prints **your** numbers, not a fixture's: the broker's own demo/real
+classification, the symbol's point value, the live spread, which rule sets the
+first level's distance (the broker's or this app's), your completed-grid
+estimate, and the commission it can measure from your own closed deals. Then it
+lists the settings that are still unset with the exact `.env` lines to add.
+
+It **refuses to read anything further if the terminal is logged into a REAL
+account**, and there is no order call anywhere in the file — 17 tests assert
+both against a fake terminal.
+
+### Step 2 — fill in the settings it lists.
+
+Edit `backend\.env`, add the lines it printed, and restart the backend. Two of
+them are yours to decide and the tool will not decide them for you:
+
+| Setting | What it means |
+| --- | --- |
+| `GRID_BASKET_STOP_LOSS_USD` | the most one basket may lose before it is closed. Must exceed your completed-grid estimate, or admission refuses every grid and says so |
+| `GRID_MAX_DAILY_LOSS_USD` | the most the day may lose, judged on the **marked** result with floating loss included |
+| `GRID_CAPITAL_FLOOR_USD` | the balance this account is never traded below. Also an **active trigger**: if equity reaches it while the bot owns exposure, the bot closes **its own** positions and latches entries |
+
+And three costs, where the honest default is stated:
+
+| Setting | Where it comes from |
+| --- | --- |
+| `EXIT_COMMISSION_PER_LOT_USD` | the pre-flight measures it from your closed deals. No deals yet? Place **one** manual trade by hand, close it, run the pre-flight again |
+| `SLIPPAGE_POINTS_PER_FILL` | what you have actually observed. Put `0` only if you have looked and seen none |
+| `BROKER_PROFIT_INCLUDES_EXIT_SPREAD` | **if you do not know, put `no`.** That is the conservative side: it can only make the bot stricter, never looser |
+
+Run the pre-flight again. It should end with `Every check this tool can make has
+passed`.
+
+### Step 3 — start the backend and the dashboard. This does not start trading.
+
+```powershell
+cd C:\Users\Home\Documents\basit-qureshi\backend; .\venv\Scripts\python.exe run.py
+```
+Second window:
+```powershell
+cd C:\Users\Home\Documents\basit-qureshi\frontend; npm run dev
+```
+
+Check the dashboard **before** pressing Start:
+
+- the badge says **DEMO**
+- `account_verified` matches your demo account and `broker_trade_mode` reads
+  `demo` — the broker's word, not the app's setting
+- the Grid panel shows your three risk numbers and the day's marked reading
+- no entry-block reason is showing. If one is, it names exactly what is missing
+
+### Step 4 — run it, and watch these four things.
+
+Press **Start**. During the run, the dashboard tells you the truth about:
+
+| What you see | What it means |
+| --- | --- |
+| **⏸ Entries paused** | new grids stopped; open positions are still managed |
+| **🛑 Holding exposure at zero after …** | a loss stop left a standing instruction. Every late fill will be closed again. **Only Resume entries clears it** |
+| **⏳ Closing (state, attempt n)** | a close was ordered and is not confirmed yet. "Sent" is not "gone" |
+| **unknown** anywhere in the exposure panel | the broker could not be read. It is not zero, and the bot will not treat it as zero |
+
+### Step 5 — stop it safely. Read this before you close anything.
+
+**There is no broker-hosted stop loss.** No SL or TP is attached to any order,
+so if the backend stops, nothing closes anything.
+
+1. Press **Pause entries**
+2. Wait for **0 positions AND 0 resting orders** — or press **Close positions**
+   and wait for the same confirmation. `unknown` is not zero
+3. Only then stop the backend
+
+Never kill the process to end a session while anything is open.
+
+### Step 6 — keep the record.
+
+```powershell
+$api = "http://127.0.0.1:8000/api"
+Invoke-RestMethod -Method Post $api/session/start | ConvertTo-Json -Depth 5
+```
+Run that **before** Start in step 4 if you want the session recorded, then after
+step 5:
+```powershell
+Invoke-RestMethod -Method Post $api/session/stop | ConvertTo-Json -Depth 5
+.\venv\Scripts\python.exe tools\export_session.py --list
+```
+§F has the full procedure and the redaction rules.
+
+### What this demo run will and will not tell you
+
+It **will** tell you whether the machinery works on a real terminal: does it
+place the grid it calculated, does it close when it says it closes, does the
+dashboard match MT5, does a halt survive a restart.
+
+It will **not** tell you whether the strategy makes money. A handful of baskets
+on one stretch of market cannot separate skill from luck, and the strategy's
+central risk — both sides filling and the basket freezing near your
+completed-grid estimate — has never been measured on real price history. For
+that, §B1's tick export is still the only answer.
+
+---
+
+## D. Controlled demo verification — the deeper checklist
+
+§D0 above is the path to follow for a first demo run. This section is the fuller
+set of checks worth doing once it is running: ownership scope, pause semantics,
+one supervised lifecycle, truthful exposure under a disconnect, and recovery
+across a restart. None of it has been run yet.
 
 **D0 — prerequisites.** Funded demo account. `BROKER_MODE=mt5`, `ACCOUNT_TYPE=demo`,
 `SYMBOL` matching Market Watch exactly, and the three risk numbers saved.

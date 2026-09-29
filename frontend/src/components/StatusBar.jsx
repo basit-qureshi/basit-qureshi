@@ -13,7 +13,7 @@ export default function StatusBar({
 
   const {
     running, mode, connected, symbol, timeframe, last_error, strategy_name, daily_target_hit,
-    entries_paused, pause_reason, close_intent, persistence_error,
+    entries_paused, pause_reason, close_intent, persistence_error, liquidation_policy,
   } = status;
 
   // Named by the engine from the strategy object it is actually holding, not
@@ -61,6 +61,17 @@ export default function StatusBar({
         {daily_target_hit && <span className="tone-green">✓ Daily target reached — halted for this broker day</span>}
         {entries_paused && (
           <span className="tone-amber">⏸ Entries paused{pause_reason ? ` — ${pause_reason}` : ""}. Open positions are still managed.</span>
+        )}
+        {/* A standing instruction only the owner can lift. It outlives the close
+            that satisfied it, so it needs its own line: without this, a bot
+            that keeps flattening every late fill looks broken rather than
+            obedient. */}
+        {liquidation_policy && (
+          <span className="error-text">
+            🛑 Holding exposure at zero after {liquidation_policy.cause}
+            {liquidation_policy.cleanups > 0 && ` — ${liquidation_policy.cleanups} cleanup(s) since`}
+            . Only Resume entries clears this.
+          </span>
         )}
         {close_intent && close_intent.state !== "DONE" && (
           <span className="error-text">
