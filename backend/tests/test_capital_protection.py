@@ -610,3 +610,115 @@ def test_the_basket_stop_is_judged_on_unrounded_money_too(broker, engine_factory
     assert min(net, gross) > -e.basket_stop_loss_usd, (
         "a rounded reading would have fired the stop early"
     )
+
+
+# --- D10: a missing day anchor that could never be repaired -------------------
+#
+# Seen on the owner's demo screen: the bot was running, nothing was open, and
+# every cycle refused with "today's accounting is incomplete — no opening
+# exposure anchor for this day". `_roll_day` establishes the anchor only when the
+# day CHANGES, and `_ensure_day_bound` returned early once the day was bound, so
+# nothing re-established it. The refusal could not clear until the next day.
+
+
+def bound_day_without_anchor(engine, broker):
+    """The stuck state: day bound, anchor missing."""
+    engine._protective_tick()
+    assert engine._trading_day is not None
+    engine._day_open_marked = None          # as a failed read, or a restored null, leaves it
+    return engine
+
+
+def test_a_missing_anchor_blocks_entries(broker, engine_factory):
+    """The symptom, before the repair runs."""
+    e = engine_factory(basket_stop_loss_usd=60.0, max_daily_loss_usd=100.0)
+    bound_day_without_anchor(e, broker)
+
+    risk = e._day_risk([])
+    assert risk.complete is False
+    assert any("anchor" in reason for reason in risk.incomplete_reasons)
+
+
+def test_the_anchor_is_repaired_when_this_bot_owns_nothing(broker, engine_factory):
+    e = engine_factory(basket_stop_loss_usd=60.0, max_daily_loss_usd=100.0)
+    bound_day_without_anchor(e, broker)
+    assert broker.get_open_positions("XAUUSD", magic=MAGIC) == [], "fixture: nothing open"
+
+    e._ensure_day_bound(broker.get_account_info())
+
+    assert e._day_open_marked == 0.0, "the anchor was not repaired"
+    assert e._day_risk([]).complete is True
+    allowed, reason = e._entry_gate(broker.get_account_info())
+    assert allowed is True, f"still blocked after the repair: {reason}"
+
+
+def test_the_repair_survives_a_restart(broker, engine_factory):
+    e = engine_factory(basket_stop_loss_usd=60.0, max_daily_loss_usd=100.0)
+    bound_day_without_anchor(e, broker)
+    e._ensure_day_bound(broker.get_account_info())
+
+    fresh = engine_factory(basket_stop_loss_usd=60.0, max_daily_loss_usd=100.0)
+    assert fresh._day_open_marked == 0.0, "the repaired anchor was not persisted"
+
+
+def test_the_anchor_is_not_invented_while_something_is_open(broker, engine_factory):
+    """With exposure open, what was carried into the day cannot be reconstructed.
+
+    Setting it to zero here would subtract nothing and quietly count today's
+    floating loss as if it had been carried in — hiding part of it from the
+    daily limit. Blocking is the safe direction.
+    """
+    from app.brokers.base import OrderSide
+
+    e = engine_factory(basket_stop_loss_usd=60.0, max_daily_loss_usd=100.0)
+    bound_day_without_anchor(e, broker)
+    broker.open_position(OrderSide.BUY, broker.price, magic=MAGIC)
+
+    e._ensure_day_bound(broker.get_account_info())
+
+    assert e._day_open_marked is None, "an anchor was invented over live exposure"
+    assert e._day_risk().complete is False
+
+
+def test_a_resting_order_also_stops_the_repair(broker, engine_factory):
+    from app.brokers.base import PendingType
+
+    e = engine_factory(basket_stop_loss_usd=60.0, max_daily_loss_usd=100.0)
+    bound_day_without_anchor(e, broker)
+    broker.place_pending_order("XAUUSD", PendingType.BUY_STOP, 0.01,
+                               broker.price + 5.0, "GRID", MAGIC)
+
+    e._ensure_day_bound(broker.get_account_info())
+    assert e._day_open_marked is None, "an order that could fill was ignored"
+
+
+def test_an_unreadable_broker_does_not_repair_the_anchor(broker, engine_factory, monkeypatch):
+    e = engine_factory(basket_stop_loss_usd=60.0, max_daily_loss_usd=100.0)
+    bound_day_without_anchor(e, broker)
+    monkeypatch.setattr(broker, "get_open_positions",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("link down")))
+
+    e._ensure_day_bound(broker.get_account_info())
+    assert e._day_open_marked is None, "unreadable was treated as empty"
+
+
+def test_an_existing_anchor_is_never_overwritten(broker, engine_factory):
+    e = engine_factory(basket_stop_loss_usd=60.0, max_daily_loss_usd=100.0)
+    e._protective_tick()
+    e._day_open_marked = -12.34           # carried in from yesterday
+
+    e._ensure_day_bound(broker.get_account_info())
+    assert e._day_open_marked == -12.34, "a real anchor was replaced"
+
+
+def test_a_running_engine_repairs_itself_on_the_next_cycle(broker, engine_factory):
+    """End to end: the owner does nothing, and the next protective tick clears it."""
+    e = engine_factory(basket_stop_loss_usd=60.0, max_daily_loss_usd=100.0)
+    bound_day_without_anchor(e, broker)
+    assert e._entry_gate(broker.get_account_info())[0] is False
+
+    e._protective_tick()
+
+    assert e._day_open_marked == 0.0
+    allowed, reason = e._entry_gate(broker.get_account_info())
+    assert allowed is True, f"the bot was still refusing after a full cycle: {reason}"

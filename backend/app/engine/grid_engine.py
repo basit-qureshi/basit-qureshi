@@ -734,20 +734,60 @@ class GridEngine:
         self._broadcast(account, positions, pendings, basket_profit, hedged=hedged)
 
     def _ensure_day_bound(self, account) -> None:
-        """Binds the trading day if nothing has yet.
+        """Binds the trading day if nothing has yet, and repairs a missing anchor.
 
         The day rolls once a day, so rolling it belongs on the reporting
         cadence — but the daily loss limit cannot be judged without it. This
         pays the one candle read needed after a restart and then stays out of
         the way.
+
+        The trap this also fixes. `_roll_day` establishes the opening anchor only
+        when the day CHANGES. If the day is already bound but the anchor is
+        missing — the positions read failed at the moment it rolled, or a record
+        persisted with a null anchor was restored — nothing re-established it,
+        the day's reading stayed incomplete, and admission refused every grid
+        with "today's accounting is incomplete" until the next day rolled over.
+        An owner watching that has a bot that never trades and a reason that
+        never clears.
+
+        The repair is deliberately narrow. The anchor means "what this bot was
+        already holding when the day turned". It is set to zero here ONLY when
+        the bot currently owns nothing, because then that is a fact rather than a
+        guess. With positions open, what was carried into the day cannot be
+        reconstructed from here — subtracting a wrong anchor would hide part of
+        today's floating loss from the daily limit — so it stays missing and
+        entries stay blocked, which is the safe direction.
         """
-        if self._trading_day is not None:
+        if self._trading_day is None:
+            try:
+                candle = self._current_candle_time()
+            except Exception:
+                return
+            self._roll_day(account.equity, candle)
             return
-        try:
-            candle = self._current_candle_time()
-        except Exception:
+
+        if self._day_open_marked is not None:
             return
-        self._roll_day(account.equity, candle)
+
+        positions = self._safe_positions()
+        pendings = self._safe_pendings()
+        if positions is None or pendings is None:
+            return                      # unreadable is not empty
+        if positions or pendings:
+            # Something is open and its opening mark is unknown. Blocking is
+            # correct: an invented anchor would understate today's loss.
+            return
+        self._day_open_marked = 0.0
+        logger.warning(
+            "the opening exposure anchor for %s was missing and this bot owns nothing, "
+            "so it is established at 0.00 — today's reading is complete again",
+            self._trading_day,
+        )
+        self._record_evidence(evidence_session.CORRECTION,
+                              corrects_event_id="day_open_marked",
+                              reason="anchor re-established at 0.00 with nothing open",
+                              trading_day=self._trading_day)
+        self._persist_risk_state()
 
     def _note_quote(self, positions) -> None:
         """Records the current quote with its two clocks kept apart.
