@@ -47,7 +47,7 @@ def test_a_ten_dollar_target_is_not_reached_by_that_example(broker, engine_facto
     settled(15.00, ticket="a")
     settled(-4.00, ticket="b")
     settled(-6.00, ticket="c")
-    e = engine_factory(daily_profit_target_usd=10.0)
+    e = engine_factory(daily_profit_target_usd=10.0, max_daily_loss_usd=10_000.0)
     assert len(armed(broker, e)) == 20, "halted on a $5.00 net against a $10.00 target"
 
 
@@ -67,14 +67,14 @@ def test_other_identities_do_not_move_the_daily_figures():
 # 9 + 10 ------------------------------------------------------------------
 def test_target_does_not_trigger_at_one_cent_short(broker, engine_factory):
     settled(9.99, ticket="a")
-    e = engine_factory(daily_profit_target_usd=10.0)
+    e = engine_factory(daily_profit_target_usd=10.0, max_daily_loss_usd=10_000.0)
     assert len(armed(broker, e)) == 20
     assert e._daily_target_hit is False
 
 
 def test_target_triggers_at_exactly_the_target(broker, engine_factory):
     settled(10.00, ticket="a")
-    e = engine_factory(daily_profit_target_usd=10.0)
+    e = engine_factory(daily_profit_target_usd=10.0, max_daily_loss_usd=10_000.0)
     e._tick()
     broker.next_candle()
     e._tick()
@@ -84,7 +84,7 @@ def test_target_triggers_at_exactly_the_target(broker, engine_factory):
 
 # 11 ----------------------------------------------------------------------
 def test_orders_stay_at_zero_for_the_rest_of_the_day(broker, engine_factory):
-    e = engine_factory(daily_profit_target_usd=10.0)
+    e = engine_factory(daily_profit_target_usd=10.0, max_daily_loss_usd=10_000.0)
     grid = armed(broker, e)
     assert len(grid) == 20
 
@@ -100,13 +100,13 @@ def test_orders_stay_at_zero_for_the_rest_of_the_day(broker, engine_factory):
 # 12 + 13 -----------------------------------------------------------------
 def test_a_restart_does_not_bypass_the_lock(broker, engine_factory):
     settled(11.00, ticket="a")
-    e = engine_factory(daily_profit_target_usd=10.0)
+    e = engine_factory(daily_profit_target_usd=10.0, max_daily_loss_usd=10_000.0)
     e._tick()
     broker.next_candle()
     e._tick()
     assert orders(broker) == []
 
-    fresh = engine_factory(daily_profit_target_usd=10.0)  # backend restarted
+    fresh = engine_factory(daily_profit_target_usd=10.0, max_daily_loss_usd=10_000.0)  # backend restarted
     for _ in range(3):
         broker.next_candle()
         fresh._tick()
@@ -116,7 +116,7 @@ def test_a_restart_does_not_bypass_the_lock(broker, engine_factory):
 
 def test_clicking_start_again_does_not_bypass_the_lock(broker, engine_factory):
     settled(11.00, ticket="a")
-    e = engine_factory(daily_profit_target_usd=10.0)
+    e = engine_factory(daily_profit_target_usd=10.0, max_daily_loss_usd=10_000.0)
     e._tick()
     e._running = False
     e._arm_gate("Bot started") if e._gate_anchor is None else None
@@ -128,7 +128,7 @@ def test_clicking_start_again_does_not_bypass_the_lock(broker, engine_factory):
 # 14 ----------------------------------------------------------------------
 def test_the_next_day_resets_the_lock_and_still_waits_a_candle(broker, engine_factory):
     settled(11.00, ticket="a")
-    e = engine_factory(daily_profit_target_usd=10.0)
+    e = engine_factory(daily_profit_target_usd=10.0, max_daily_loss_usd=10_000.0)
     e._tick()
     broker.next_candle()
     e._tick()
@@ -148,7 +148,7 @@ def test_the_next_day_resets_the_lock_and_still_waits_a_candle(broker, engine_fa
 def test_commission_and_swap_are_included(broker, engine_factory, monkeypatch):
     """MT5 reports profit, commission and swap separately; the broker adapter
     sums them, so whatever it hands back is what the day counts."""
-    e = engine_factory()
+    e = engine_factory(max_daily_loss_usd=10_000.0)
     e._tick()
     broker.next_candle()
     e._tick()
@@ -166,7 +166,7 @@ def test_commission_and_swap_are_included(broker, engine_factory, monkeypatch):
 
 
 def test_unsettled_trades_block_a_new_grid(broker, engine_factory, monkeypatch):
-    e = engine_factory()
+    e = engine_factory(max_daily_loss_usd=10_000.0)
     e._tick()
     broker.next_candle()
     e._tick()

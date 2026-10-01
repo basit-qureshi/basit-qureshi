@@ -1,15 +1,28 @@
+import logging
 from datetime import datetime, timedelta, timezone
 import pandas as pd
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import and_, or_
 
-from app.api.schemas import BacktestRequest, ModeUpdate, SettingsUpdate, StartRequest, TestOrderRequest
+from app.api.schemas import (
+    BacktestRequest,
+    EngineProfileUpdate,
+    ModeUpdate,
+    SettingsUpdate,
+    StartRequest,
+    TestOrderRequest,
+)
 from app.backtest.backtester import run_grid_backtest
 from app.bot_manager import bot_manager
 from app.brokers.base import OrderSide, PendingType
+from app.config import settings
 from app import db as db_module
 from app.db import TradeRecord
+from app.engine import profiles as engine_profiles
+from app.strategy import profiles as strategy_profiles
 from app.strategy.indicators import ema
+
+logger = logging.getLogger("api")
 
 router = APIRouter(prefix="/api")
 
@@ -55,10 +68,31 @@ async def get_status():
     return {**engine.status(), "settings": bot_manager.settings, "account": account}
 
 
+def _require_verified_account(engine):
+    """Every entry path checks the BROKER's account classification.
+
+    The app's demo/real setting is a local string and has never been evidence
+    of what the terminal is logged into. A real account behind a "demo" label
+    is refused here, on the manual test order as well as on Start, and an
+    unknown classification is refused rather than assumed harmless.
+    """
+    if not engine.broker.is_connected():
+        engine.broker.connect()
+    try:
+        account = engine.broker.get_account_info()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Could not read the account: {exc}")
+    verdict = engine.verify_account(account)
+    if not verdict.allowed:
+        raise HTTPException(status_code=403, detail=verdict.reason)
+    return account
+
+
 @router.post("/start")
 async def start_bot(body: StartRequest):
     # Must run on the main event loop (not FastAPI's sync threadpool) since
     # engine.start() schedules an asyncio task on the currently running loop.
+    _require_verified_account(bot_manager.engine)
     try:
         bot_manager.engine.start(confirm_real=body.confirm_real)
     except PermissionError as exc:
@@ -81,8 +115,47 @@ async def clear_halt():
 
 @router.post("/stop")
 async def stop_bot():
-    bot_manager.engine.stop()
-    return {"ok": True}
+    """Compatibility endpoint for the original Stop button.
+
+    Stop cancels the MANAGEMENT LOOP. With it cancelled the basket target, the
+    basket stop, the daily limit and the drawdown limit are all no longer
+    evaluated, while any positions stay live at the broker. The response says
+    exactly what is left open so no caller can present this as a flat account.
+    Callers that want protection to continue should use /api/pause-entries;
+    callers that want the exposure gone should use /api/close-and-pause.
+    """
+    flat, message = bot_manager.engine.stop()
+    return {"ok": True, "flat": flat, "message": message}
+
+
+@router.post("/pause-entries")
+async def pause_entries():
+    """Stop opening new exposure while continuing to manage and protect what is
+    already open. Cancels resting entry orders and re-reads the result, since a
+    stop can fill in the moment between reading and cancelling."""
+    ok, message = bot_manager.engine.pause_entries()
+    return {"ok": ok, "message": message}
+
+
+@router.post("/resume-entries")
+async def resume_entries():
+    """Owner action. Refuses while a halt or an unfinished close stands."""
+    ok, message = bot_manager.engine.resume_entries()
+    if not ok:
+        raise HTTPException(status_code=409, detail=message)
+    return {"ok": True, "message": message}
+
+
+@router.post("/close-and-pause")
+async def close_and_pause():
+    """Flatten this bot's own positions and orders, then stay paused.
+
+    Only this bot's magic number is touched; a manual trade is never closed by
+    this. It remains active across polls until the broker confirms flat, so a
+    single failed attempt does not end it.
+    """
+    ok, message = bot_manager.engine.close_and_pause()
+    return {"ok": ok, "message": message}
 
 
 def _trade_json(r: TradeRecord) -> dict:
@@ -258,10 +331,15 @@ async def get_open_trades():
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"could not read open positions: {exc}")
 
+    # A failed read is UNKNOWN, not zero. Rendering it as an empty list was how
+    # a disconnected terminal displayed as a confirmed flat account.
+    pendings_known = True
     try:
         pendings = engine.broker.get_pending_orders(engine.symbol, magic=engine.magic_number)
-    except Exception:
+    except Exception as exc:
+        logger.warning("pending orders could not be read: %s", exc)
         pendings = []
+        pendings_known = False
 
     opened_at = {}
     with db_module.SessionLocal() as session:
@@ -293,25 +371,34 @@ async def get_open_trades():
         })
     items.sort(key=lambda i: i["net_profit"])
 
-    net, gross, costs_known = engine._basket_pnl(positions)
+    net, gross, costs_known = engine._basket_pnl_display(positions)
     exit_cost = engine._estimated_exit_cost(positions)
     return {
         "connected": True,
+        **engine._observation_header(),
+        "positions_known": True,
+        "pending_orders_known": pendings_known,
         "positions": items,
-        "pending_orders": len(pendings),
-        "buy_stops": sum(1 for o in pendings if o.order_type == PendingType.BUY_STOP),
-        "sell_stops": sum(1 for o in pendings if o.order_type == PendingType.SELL_STOP),
+        "pending_orders": len(pendings) if pendings_known else None,
+        "buy_stops": sum(1 for o in pendings if o.order_type == PendingType.BUY_STOP) if pendings_known else None,
+        "sell_stops": sum(1 for o in pendings if o.order_type == PendingType.SELL_STOP) if pendings_known else None,
         "totals": {
             "count": len(items),
             "volume": round(sum(i["volume"] for i in items), 2),
             "gross_profit": gross,
             "net_profit": net,
+            # None when it could not be estimated. Never 0.0 as a stand-in:
+            # returning zero for missing cost data is what made the reading
+            # least conservative exactly when the data was worst.
             "estimated_exit_cost": exit_cost,
-            # What the basket rule is actually judged on.
-            "after_exit_cost": round(net - exit_cost, 2),
+            "exit_cost_known": exit_cost is not None,
+            # The value the basket target is judged on, under the same contract
+            # the engine uses.
+            "after_exit_cost": round(net - (exit_cost or 0.0), 2),
             "costs_known": costs_known,
             "target": engine.basket_take_profit_usd,
         },
+        "day_risk": engine._day_risk(positions).as_dict(),
     }
 
 
@@ -414,6 +501,144 @@ def get_candles(count: int = 200):
     }
 
 
+def current_ai_mode() -> str:
+    """The mode the engine is ACTUALLY running, from one place.
+
+    It is disabled because the engine contains no call site that consults a
+    model - not because a default says so. `/api/ai-status` and the session
+    manifest both read this, so the day a mode becomes selectable there is one
+    line to change and the manifest cannot drift away from the truth.
+    """
+    from app.ai.contracts import AIMode
+    return AIMode.DISABLED.value
+
+
+@router.post("/session/start")
+def start_evidence_session(replace: bool = False):
+    """Begins recording a demo evidence session. Starts no trading.
+
+    The profile is frozen for the session and the AI mode is recorded as it
+    actually is. Account type stays UNVERIFIED unless the broker itself has
+    been asked and agreed - the app's demo/real setting is not an observation.
+
+    A second start refuses rather than replacing a live recorder: quietly
+    swapping one out mid-session splits the evidence for one run across two
+    files and leaves neither reconcilable. Pass `replace=true` to mean it.
+    """
+    from app.evidence import session as ev
+    from app.strategy import profiles as sp
+
+    engine = bot_manager.engine
+    running = getattr(engine.evidence, "manifest", None)
+    if running is not None and not replace:
+        return {"ok": False,
+                "reason": f"session {running.session_id} is already recording; "
+                          "stop it first, or pass replace=true",
+                "session": running.as_dict()}
+
+    account, verified = None, False
+    if engine.broker.is_connected():
+        try:
+            account = engine.broker.get_account_info()
+            verified = engine.verify_account(account).allowed
+        except Exception as exc:
+            logger.warning("account could not be read for the manifest: %s", exc)
+
+    manifest = ev.build_manifest(
+        profile_key=sp.BASELINE.key,
+        strategy_config={k: v for k, v in bot_manager.settings.items()
+                         if k.startswith("grid_") or k in ("symbol", "timeframe", "mode")},
+        symbol=engine.symbol,
+        accounting_timezone=engine.timezone_name,
+        ai_mode=current_ai_mode(),
+        account_info=account, account_verified=verified,
+    )
+    engine.evidence = ev.SessionEvidence(manifest, directory=settings.evidence_dir)
+    return {"ok": True, "session": manifest.as_dict(),
+            "directory": settings.evidence_dir}
+
+
+@router.post("/session/stop")
+def stop_evidence_session():
+    """Stops recording. Does not stop the bot and does not close anything."""
+    from app.evidence import session as ev
+
+    engine = bot_manager.engine
+    coverage = engine.evidence.coverage()
+    engine.evidence = ev.NullEvidence()
+    return {"ok": True, "coverage": coverage}
+
+
+@router.get("/session/status")
+def evidence_session_status():
+    engine = bot_manager.engine
+    manifest = getattr(engine.evidence, "manifest", None)
+    return {
+        "active": manifest is not None,
+        "manifest": manifest.as_dict() if manifest else None,
+        "coverage": engine.evidence.coverage(),
+    }
+
+
+@router.get("/session/packet")
+def evidence_packet():
+    """The REDACTED packet, safe to share for review."""
+    return bot_manager.engine.evidence.shareable()
+
+
+@router.get("/ai-status")
+def get_ai_status():
+    """What the AI layer is doing, which is nothing by default.
+
+    AI mode is DISABLED unless explicitly selected. Shadow mode records
+    predictions and changes no order, no risk setting and no baseline
+    decision. There is no mode in which a model can turn a deterministic
+    block into an allow.
+    """
+    from app.ai.contracts import AIMode
+    from app.ai.features import FEATURE_SCHEMA
+    from app.news.extraction import NullExtractor
+    from app.ai.monitoring import RULES
+
+    extractor = NullExtractor()
+    return {
+        "mode": current_ai_mode(),
+        "available_modes": [AIMode.DISABLED.value, AIMode.SHADOW.value],
+        "gating_selectable": False,
+        "model_loaded": False,
+        "model_reason": "no trained model exists: there is no market data to train on",
+        "feature_schema": FEATURE_SCHEMA.as_dict(),
+        "news_provider": {"configured": False,
+                          "reason": "no provider selected; local file adapter available"},
+        "llm_extraction": extractor.health(),
+        "drift_rules": RULES,
+        "note": (
+            "AI cannot place an order, choose a direction, change the lot or spacing, "
+            "move a stop, or release an entry block. Protective exits are deterministic "
+            "and never consult a model."
+        ),
+    }
+
+
+@router.get("/research-profiles")
+def get_research_profiles():
+    """The named, versioned profiles and which one is actually live.
+
+    Phase C candidates are research only. They are listed here so their gates
+    and parameters are inspectable, and every one reports live_enabled=false —
+    offline evidence is not approval to trade.
+    """
+    return {
+        "active": strategy_profiles.BASELINE.key,
+        "active_detail": strategy_profiles.BASELINE.as_dict(),
+        "profiles": [p.as_dict() for p in strategy_profiles.ALL_PROFILES.values()],
+        "note": (
+            "Research profiles are evaluated offline only. Selection is currently "
+            "BLOCKED BY DATA: no tick history is present in this repository."
+        ),
+    }
+
+
 @router.get("/settings")
 def get_settings():
     return bot_manager.settings
@@ -427,6 +652,42 @@ async def update_settings(body: SettingsUpdate):
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     return bot_manager.settings
+
+
+@router.get("/engine-profile")
+def get_engine_profile():
+    """Which engine is driving the account, and what the choice actually means.
+
+    The two descriptions are served from one place so the dashboard cannot
+    describe a profile differently from the API, and so the difference is
+    readable before it is selected rather than after.
+    """
+    active = bot_manager.engine_profile()
+    return {
+        "active": active,
+        "active_detail": engine_profiles.describe(active),
+        "profiles": [p.as_dict() for p in engine_profiles.ALL_PROFILES.values()],
+        "switchable": not bot_manager.engine.running,
+        "note": (
+            "The grid is identical in both profiles: same levels, spacing, lot, basket target and "
+            "next-candle gate. Switching changes how much the engine refuses to assume, not what "
+            "it trades. Neither profile has been shown to be profitable."
+        ),
+    }
+
+
+@router.post("/engine-profile")
+def set_engine_profile(body: EngineProfileUpdate):
+    """Switch engines. Refuses while running, while exposure is open, or while
+    either profile carries an unresolved halt — the reasons are in
+    `BotManager.set_engine_profile`."""
+    try:
+        result = bot_manager.set_engine_profile(body.profile)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"ok": True, **result, "active_detail": engine_profiles.describe(result["profile"])}
 
 
 @router.post("/mode")
@@ -452,12 +713,13 @@ def test_order(body: TestOrderRequest):
     if body.side not in ("BUY", "SELL"):
         raise HTTPException(status_code=400, detail="side must be 'BUY' or 'SELL'")
     engine = bot_manager.engine
+    # Manual ownership of the order is not permission to skip the account
+    # check: the danger is the same whoever pressed the button.
+    _require_verified_account(engine)
     if engine.mode == "real" and not body.confirm_real:
         raise HTTPException(
             status_code=403, detail="Placing a manual order on a REAL account requires confirm_real=true"
         )
-    if not engine.broker.is_connected():
-        engine.broker.connect()
 
     side = OrderSide.BUY if body.side == "BUY" else OrderSide.SELL
     try:

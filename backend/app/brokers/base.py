@@ -30,13 +30,37 @@ class PendingOrder:
 
 @dataclass
 class AccountInfo:
+    """What the broker says about the account.
+
+    Every field that the engine is allowed to make a decision on is `None` when
+    the broker did not supply it, never a convenient default. The previous
+    model had no `free_margin` field at all, so the admission check read it with
+    `getattr(account, "free_margin", None)` and silently passed every time.
+    A missing value must block admission, not sail through it.
+    """
+
     balance: float
     equity: float
     currency: str
     leverage: int
     account_id: str = "legacy"
-    trade_mode: str = "demo"
-    hedging: bool = True
+    # "demo", "real", "contest" or "unknown" — the BROKER's own classification,
+    # not the app's mode setting. They are different things and only this one
+    # is authoritative.
+    trade_mode: str = "unknown"
+    # None means the broker did not say. Netting vs hedging changes what a
+    # two-sided grid even costs in margin, so it is not assumed.
+    hedging: bool | None = None
+    free_margin: float | None = None
+    margin: float | None = None
+    margin_level: float | None = None
+    # Whether the broker currently permits this account to trade at all.
+    trade_allowed: bool | None = None
+    broker_id: str | None = None
+
+    @property
+    def identity_known(self) -> bool:
+        return self.trade_mode in ("demo", "real") and bool(self.account_id)
 
 
 @dataclass
@@ -68,8 +92,85 @@ class SymbolInfo:
     pip_value_per_lot: float  # profit/loss per pip per 1.0 lot, in account currency
     min_volume: float
     volume_step: float
-    min_stop_distance: float = 0.0  # broker's minimum SL/TP distance from price, in price units
+    #: The distance actually used to place the first grid level, in price units.
+    #: It is the LARGER of a broker requirement and an application heuristic, and
+    #: the three fields below say which is which. Do not read this field as "what
+    #: the broker requires": it usually is not.
+    min_stop_distance: float = 0.0
     spread: float = 0.0  # current ask - bid, in price units
+    # --- where `min_stop_distance` comes from, kept separate ------------------
+    # Conflating these hid an application choice behind a broker name. The
+    # spread-multiple heuristic below is this app's invention, not a rule any
+    # broker states, and on a wide spread it is usually the binding one — which
+    # pushes every grid level further out and raises the completed-grid estimate.
+    #: `trade_stops_level * point` exactly as the broker reports it, no buffer.
+    broker_stop_level_distance: float = 0.0
+    #: Extra distance THIS APPLICATION adds on top of the broker's figure, to
+    #: survive rounding and price movement between calculation and submission.
+    app_stop_buffer: float = 0.0
+    #: This application's fallback for brokers that declare no minimum yet still
+    #: reject a stop inside the live spread. A multiple of the spread.
+    app_spread_multiple_distance: float = 0.0
+    #: The multiple used above, so a reader does not have to divide to find it.
+    app_spread_multiple: float = 0.0
+
+    # --- is this specification usable at all? ---------------------------------
+    #: False when a value the money maths needs could not be established. The
+    #: adapter used to substitute 1.0 for a missing tick value, which turned "we
+    #: do not know what a point is worth" into "a point is worth one unit" — and
+    #: every downstream figure inherited that invention silently.
+    valuation_ok: bool = True
+    #: Why not, one string per problem. Empty when `valuation_ok`.
+    valuation_problems: tuple = ()
+    #: Whether a quote was obtained at all. A missing quote is NOT a zero spread:
+    #: a genuinely observed zero spread is possible on some feeds, and the two
+    #: must not collapse into the same number.
+    quote_available: bool = True
+    spread_available: bool = True
+
+    @property
+    def usable_for_new_exposure(self) -> bool:
+        """Enough is known to price a new grid honestly."""
+        return self.valuation_ok and self.spread_available
+
+    def valuation_report(self) -> dict:
+        return {
+            "valuation_ok": self.valuation_ok,
+            "valuation_problems": list(self.valuation_problems),
+            "quote_available": self.quote_available,
+            "spread_available": self.spread_available,
+            "pip_size": self.pip_size,
+            "pip_value_per_lot": self.pip_value_per_lot,
+        }
+
+    @property
+    def stop_distance_binding(self) -> str:
+        """Which input is actually setting the first grid step."""
+        broker_side = self.broker_stop_level_distance + self.app_stop_buffer
+        if not self.min_stop_distance:
+            return "none"
+        if self.app_spread_multiple_distance > broker_side:
+            return "app_spread_multiple"
+        if self.app_stop_buffer and self.broker_stop_level_distance:
+            return "broker_stop_level_plus_app_buffer"
+        return "broker_stop_level" if self.broker_stop_level_distance else "app_spread_multiple"
+
+    def stop_distance_breakdown(self) -> dict:
+        return {
+            "effective_min_stop_distance": round(self.min_stop_distance, 6),
+            "broker_stop_level_distance": round(self.broker_stop_level_distance, 6),
+            "app_stop_buffer": round(self.app_stop_buffer, 6),
+            "app_spread_multiple": self.app_spread_multiple,
+            "app_spread_multiple_distance": round(self.app_spread_multiple_distance, 6),
+            "binding": self.stop_distance_binding,
+            "spread": round(self.spread, 6),
+        }
+    # Whether the broker's reported floating profit is already struck at the
+    # executable closing side (bid for a long, ask for a short). When it is,
+    # subtracting a further half-spread per position double-counts the exit.
+    # None means nobody has verified it for this adapter, and an unverified
+    # semantic must not be presented as a conservative guarantee.
+    profit_includes_exit_spread: bool | None = None
 
 
 class BrokerAdapter(ABC):
@@ -154,3 +255,18 @@ class BrokerAdapter(ABC):
         """Actual realized profit of a closed position (including commission/swap
         where the broker reports them), or None if the broker can't tell."""
         ...
+
+    # --- optional capabilities ------------------------------------------------
+    # Adapters that cannot provide these simply do not implement them. The
+    # engine treats absence as "unknown" and refuses to admit new exposure on
+    # it, rather than assuming a comfortable value.
+
+    def calc_margin(self, symbol: str, side: OrderSide, volume: float, price: float) -> float | None:
+        """Margin the broker would require for ONE proposed operation.
+
+        MT5's order_calc_margin answers exactly this and nothing more: it does
+        not account for positions already open or orders already resting. The
+        caller must reconcile those separately. None means the broker could not
+        be asked.
+        """
+        return None

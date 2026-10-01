@@ -141,6 +141,15 @@ class RiskState(Base):
     data: Mapped[str] = mapped_column(String)
 
 
+class PersistenceError(RuntimeError):
+    """A risk state write did not reach storage.
+
+    Raised rather than swallowed. Protection that is not written down is not
+    durable, and the caller has to know that so it can refuse new exposure
+    instead of carrying on as though the record exists.
+    """
+
+
 def load_risk(key):
     import json
     with SessionLocal() as session:
@@ -150,10 +159,14 @@ def load_risk(key):
 
 def save_risk(key, data):
     import json
-    with SessionLocal() as session:
-        row = session.get(RiskState, key)
-        if row is None:
-            row = RiskState(key=key, data="{}")
-            session.add(row)
-        row.data = json.dumps(data)
-        session.commit()
+    try:
+        with SessionLocal() as session:
+            row = session.get(RiskState, key)
+            if row is None:
+                row = RiskState(key=key, data="{}")
+                session.add(row)
+            row.data = json.dumps(data)
+            session.commit()
+    except Exception as exc:  # noqa: BLE001 - re-raised as a typed failure
+        raise PersistenceError(str(exc)) from exc
+

@@ -16,6 +16,19 @@ from app.brokers.base import (
     SymbolInfo,
 )
 
+#: APPLICATION CHOICES, not broker requirements. Both widen the distance the
+#: first grid level is placed at, and therefore widen the completed-grid
+#: estimate that admission compares against the owner's budgets. They are named
+#: constants so the effect is attributable instead of buried in an expression.
+#:
+#: Added to the broker's declared minimum so rounding, or a price move between
+#: our calculation and the order reaching MT5, does not make a legal stop
+#: illegal. In points.
+APP_STOP_BUFFER_POINTS = 5
+#: Fallback for brokers that declare no minimum yet still reject a stop inside
+#: the live spread. No broker states this rule; it is this application's.
+APP_SPREAD_MULTIPLE = 3.0
+
 _TIMEFRAME_MAP = {
     "M1": 1,
     "M5": 5,
@@ -84,13 +97,51 @@ class MT5Broker(BrokerAdapter):
         info = self._mt5.account_info()
         if info is None:
             raise RuntimeError(f"MT5 account_info() failed: {self._mt5.last_error()}")
+        # Every field below is read with getattr and defaults to None when the
+        # terminal did not supply it. A missing margin figure has to reach the
+        # engine AS missing: the admission check refuses on unknown, and that
+        # only works if nothing invents a number here.
+        def _num(name):
+            value = getattr(info, name, None)
+            return float(value) if isinstance(value, (int, float)) else None
+
+        margin_mode = getattr(info, "margin_mode", None)
+        hedging = None
+        if margin_mode is not None:
+            hedging = margin_mode == self._mt5.ACCOUNT_MARGIN_MODE_RETAIL_HEDGING
+
         return AccountInfo(
             balance=info.balance, equity=info.equity, currency=info.currency, leverage=info.leverage,
             account_id=f"mt5:{info.server}:{info.login}",
             trade_mode={self._mt5.ACCOUNT_TRADE_MODE_DEMO: "demo",
-                        self._mt5.ACCOUNT_TRADE_MODE_REAL: "real"}.get(info.trade_mode, "unknown"),
-            hedging=info.margin_mode == self._mt5.ACCOUNT_MARGIN_MODE_RETAIL_HEDGING,
+                        self._mt5.ACCOUNT_TRADE_MODE_REAL: "real"}.get(
+                            getattr(info, "trade_mode", None), "unknown"),
+            hedging=hedging,
+            free_margin=_num("margin_free"),
+            margin=_num("margin"),
+            margin_level=_num("margin_level"),
+            trade_allowed=getattr(info, "trade_allowed", None),
+            broker_id=getattr(info, "company", None) or getattr(info, "server", None),
         )
+
+    @_synchronized
+    def calc_margin(self, symbol: str, side, volume: float, price: float) -> float | None:
+        """Margin for ONE proposed order, from MT5's own calculation.
+
+        order_calc_margin covers only the operation it is asked about. It knows
+        nothing about positions already open or orders already resting, so the
+        caller reconciles those itself rather than treating this as a portfolio
+        answer.
+        """
+        mt5 = self._mt5
+        order_type = mt5.ORDER_TYPE_BUY if getattr(side, "value", side) == "BUY" else mt5.ORDER_TYPE_SELL
+        try:
+            self._ensure_symbol_selected(symbol)
+            value = mt5.order_calc_margin(order_type, symbol, volume, price)
+        except Exception:
+            logger.exception("order_calc_margin failed for %s %s %s", symbol, side, volume)
+            return None
+        return float(value) if isinstance(value, (int, float)) else None
 
     def _ensure_symbol_selected(self, symbol: str) -> None:
         """Historical/tick data calls can fail with 'Terminal: Call failed' if the
@@ -110,24 +161,96 @@ class MT5Broker(BrokerAdapter):
         info = mt5.symbol_info(symbol)
         if info is None:
             raise RuntimeError(f"Symbol {symbol} not found on this broker")
-        pip_size = info.point * 10 if info.digits in (3, 5) else info.point
-        tick_value = info.trade_tick_value or 1.0
-        tick_size = info.trade_tick_size or info.point
-        pip_value_per_lot = (pip_size / tick_size) * tick_value if tick_size else tick_value * 10
-        # Broker's minimum SL/TP distance from the current price, in price units.
-        # A tighter stop than this gets rejected with "Invalid stops" — Gold and
-        # other non-forex-major symbols often require a much wider distance than
-        # forex pairs do. A few extra points of buffer avoids rejections from
-        # rounding/price movement between our calculation and the order reaching MT5.
+        # Valuation inputs are VALIDATED, not defaulted. The previous code read
+        # `info.trade_tick_value or 1.0`, so a broker that reported no tick value
+        # produced "one unit per point" and every figure downstream - the
+        # completed-grid estimate, the basket target, the exit reserve - inherited
+        # that invention without a word. An unknown stays unknown here, and
+        # admission refuses on it.
+        problems: list[str] = []
+
+        def usable(value, name: str, *, allow_zero: bool = False) -> float | None:
+            if value is None:
+                problems.append(f"{name} was not reported")
+                return None
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                problems.append(f"{name} was not a number ({value!r})")
+                return None
+            if not math.isfinite(number):
+                problems.append(f"{name} was not finite ({value!r})")
+                return None
+            if number < 0 or (number == 0 and not allow_zero):
+                problems.append(f"{name} was {number}, which cannot be used to price anything")
+                return None
+            return number
+
+        point = usable(getattr(info, "point", None), "symbol point size")
+        digits = getattr(info, "digits", None)
+        pip_size = 0.0
+        if point is not None:
+            pip_size = point * 10 if digits in (3, 5) else point
+
+        tick_value = usable(getattr(info, "trade_tick_value", None), "trade_tick_value")
+        # A missing tick SIZE falls back to the point size, which is the same
+        # quantity on every symbol this bot trades, so it is probed WITHOUT
+        # recording a problem. A missing tick VALUE falls back to nothing: it is
+        # the money, and that is the one this adapter used to invent.
+        raw_tick_size = getattr(info, "trade_tick_size", None)
+        tick_size = None
+        try:
+            candidate = float(raw_tick_size) if raw_tick_size is not None else None
+            if candidate is not None and math.isfinite(candidate) and candidate > 0:
+                tick_size = candidate
+        except (TypeError, ValueError):
+            tick_size = None
+        if tick_size is None and point is not None:
+            tick_size = point
+        pip_value_per_lot = 0.0
+        if tick_value is not None and tick_size:
+            pip_value_per_lot = (pip_size / tick_size) * tick_value
+        # Three separate quantities, deliberately not merged into one number
+        # until the last line. A tighter stop than the broker allows is rejected
+        # with "Invalid stops"; gold and other non-forex symbols often require a
+        # much wider distance than forex pairs do.
+        #
+        # 1. BROKER REQUIREMENT: what the terminal declares, and nothing else.
         stops_level_points = getattr(info, "trade_stops_level", 0) or 0
-        stops_level_distance = (stops_level_points + 5) * info.point if stops_level_points else 0.0
-        # Some brokers report trade_stops_level=0 (no declared minimum) yet still
-        # reject a stop that doesn't clear the live spread — Gold's spread alone
-        # can be wider than a "normal" pip-based stop. Use whichever is larger.
+        # The validated point, not the raw field: an unusable point size would
+        # otherwise raise a TypeError out of a read the protective path makes.
+        broker_stop_level_distance = stops_level_points * (point or 0.0)
+        # 2. APPLICATION BUFFER: ours, not the broker's. A few points so that
+        #    rounding, or a price move between our calculation and the order
+        #    reaching MT5, does not turn a legal stop into a rejected one. Only
+        #    added when the broker actually declared a minimum.
+        app_stop_buffer = (APP_STOP_BUFFER_POINTS * (point or 0.0)) if stops_level_points else 0.0
+        # 3. APPLICATION HEURISTIC: also ours. Some brokers report
+        #    trade_stops_level = 0 yet still reject a stop that does not clear
+        #    the live spread, and gold's spread alone can be wider than a
+        #    "normal" pip-based stop. This is not a rule any broker states, and
+        #    on a wide spread it is usually the binding term — which pushes
+        #    every grid level further out. It is reported separately for exactly
+        #    that reason.
         tick = mt5.symbol_info_tick(symbol)
-        spread = (tick.ask - tick.bid) if tick else 0.0
-        spread_based_distance = spread * 3
-        min_stop_distance = max(stops_level_distance, spread_based_distance)
+        quote_available = tick is not None
+        spread_available = False
+        spread = 0.0
+        if quote_available:
+            bid = usable(getattr(tick, "bid", None), "bid")
+            ask = usable(getattr(tick, "ask", None), "ask")
+            if bid is not None and ask is not None:
+                if ask < bid:
+                    problems.append(f"ask {ask} is below bid {bid}")
+                else:
+                    # Zero here is a genuinely observed zero spread, which is a
+                    # different fact from having no quote at all.
+                    spread, spread_available = ask - bid, True
+        else:
+            problems.append("no quote was available for this symbol")
+        app_spread_multiple_distance = spread * APP_SPREAD_MULTIPLE
+        min_stop_distance = max(broker_stop_level_distance + app_stop_buffer,
+                                app_spread_multiple_distance)
         return SymbolInfo(
             symbol=symbol,
             pip_size=pip_size,
@@ -136,6 +259,14 @@ class MT5Broker(BrokerAdapter):
             volume_step=info.volume_step,
             min_stop_distance=min_stop_distance,
             spread=spread,
+            broker_stop_level_distance=broker_stop_level_distance,
+            app_stop_buffer=app_stop_buffer,
+            app_spread_multiple_distance=app_spread_multiple_distance,
+            app_spread_multiple=APP_SPREAD_MULTIPLE,
+            valuation_ok=not problems,
+            valuation_problems=tuple(problems),
+            quote_available=quote_available,
+            spread_available=spread_available,
         )
 
     @_synchronized

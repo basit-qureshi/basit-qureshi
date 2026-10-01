@@ -75,7 +75,9 @@ def test_daily_target_still_blocks_immediate_rebuild(broker, engine_factory):
 def test_loss_exit_still_waits_for_next_candle(broker, engine_factory):
     # A $2 stop cannot accommodate a 10+10 grid, which freezes around -$37.80
     # once both sides fill, so the budget is raised and the seeded loss with it.
-    # What this test checks is the candle gate after a loss exit, not the size.
+    # A loss exit now LATCHES entries. The candle gate is still armed, but a
+    # candle alone no longer rebuilds: after a loss the bot stays paused until
+    # the owner resumes, so one breach cannot quietly become a series of them.
     broker.open_position("BUY", 4070)
     e = engine_factory(basket_stop_loss_usd=60)
     e._tick()
@@ -84,7 +86,16 @@ def test_loss_exit_still_waits_for_next_candle(broker, engine_factory):
     assert not broker.pending
     broker.next_candle()
     e._tick()
-    assert len(broker.pending) == 20
+    assert broker.pending == {}, "a loss exit must not rebuild on its own"
+    assert e._entries_paused is True
+
+    ok, message = e.resume_entries()
+    assert ok, message
+    broker.next_candle()
+    e._tick()
+    broker.next_candle()
+    e._tick()
+    assert len(broker.pending) == 20, "after an explicit resume the grid returns"
 
 
 def test_original_grid_has_fixed_lots_spacing_and_no_new_entry_filters(broker, engine_factory, monkeypatch):

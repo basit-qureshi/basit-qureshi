@@ -20,6 +20,10 @@ class SettingsUpdate(BaseModel):
     grid_max_daily_loss_usd: float | None = None
     grid_max_equity_drawdown_percent: float | None = None
     grid_capital_reserve_percent: float | None = None
+    grid_capital_floor_usd: float | None = None
+    protective_poll_seconds: float | None = None
+    reporting_poll_seconds: float | None = None
+    broker_stall_after_ms: float | None = None
     grid_magic_number: int | None = None
     grid_trading_start_hour: int | None = None
     grid_trading_end_hour: int | None = None
@@ -39,6 +43,17 @@ class SettingsUpdate(BaseModel):
 class ModeUpdate(BaseModel):
     mode: str  # "demo" or "real"
     confirm: bool = False
+
+
+class EngineProfileUpdate(BaseModel):
+    """Which engine drives the account: "guarded" or "legacy".
+
+    There is no confirm flag. Selecting the legacy engine is refused while the
+    bot is running, while it owns exposure, or while either profile is halted —
+    conditions a checkbox cannot stand in for.
+    """
+
+    profile: str
 
 
 class TestOrderRequest(BaseModel):

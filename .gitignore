@@ -13,3 +13,14 @@ frontend/package-lock.json
 .DS_Store
 
 backend/runtime_settings.before_grid_restore.json
+
+# Recorded sessions and anything exported from them. The raw log carries the
+# account identifier and whatever the engine logged; the packet is the copy
+# that is safe to share, and neither belongs in the repository.
+backend/evidence/
+backend/*.packet.json
+backend/diagnostics/
+
+# Generated review packets (exported patches of this repo's own history)
+review_packet/
+goldgrid_review_*.zip

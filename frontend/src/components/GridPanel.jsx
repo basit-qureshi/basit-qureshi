@@ -46,6 +46,104 @@ export default function GridPanel({ grid, status , onClearHalt }) {
           )}
         </>
       )}
+      {status?.day_risk && (
+        <div className="risk-readout">
+          <div className="risk-heading">
+            Daily risk reading
+            <span className="muted"> · day cut on {status.accounting_timezone} time</span>
+          </div>
+          {/* These two are DIFFERENT measurements and are not expected to
+              agree while positions are open. The realised card is settled
+              trades only; the marked reading adds today's change in open
+              exposure, which is what the daily limit is judged on. */}
+          <dl className="risk-rows">
+            <div>
+              <dt>Settled today (realised)</dt>
+              <dd>${status.day_risk.settled_realized_usd?.toFixed(2)}</dd>
+            </div>
+            <div>
+              <dt>Open mark change today</dt>
+              <dd>${status.day_risk.open_mark_change_usd?.toFixed(2)}</dd>
+            </div>
+            {status.day_risk.pending_settlement_marked_usd !== 0 && (
+              <div>
+                <dt>Closed, not settled yet</dt>
+                <dd>${status.day_risk.pending_settlement_marked_usd?.toFixed(2)}</dd>
+              </div>
+            )}
+            <div className="risk-total">
+              <dt>Marked result (limit is judged on this)</dt>
+              <dd className={status.day_risk.marked_result_usd >= 0 ? "tone-green" : "tone-red"}>
+                ${status.day_risk.marked_result_usd?.toFixed(2)}
+              </dd>
+            </div>
+            <div>
+              <dt>Exit reserve (estimate, shown apart)</dt>
+              <dd>
+                {status.day_risk.exit_reserve_usd == null
+                  ? "unknown"
+                  : `$${status.day_risk.exit_reserve_usd.toFixed(2)}`}
+              </dd>
+            </div>
+            {status.daily_limit_remaining_usd != null && (
+              <div>
+                <dt>Daily limit remaining</dt>
+                <dd className={status.daily_limit_remaining_usd > 0 ? "" : "tone-red"}>
+                  ${status.daily_limit_remaining_usd.toFixed(2)}
+                </dd>
+              </div>
+            )}
+          </dl>
+          {status.day_risk.complete === false && (
+            <p className="error-text">
+              ⚠ Today's accounting is incomplete, so no new grid may be placed:{" "}
+              {status.day_risk.incomplete_reasons?.join("; ")}
+            </p>
+          )}
+        </div>
+      )}
+      {status?.broker_owner && (
+        <div className="risk-readout">
+          <div className="risk-heading">Execution health</div>
+          <dl className="risk-rows">
+            <div>
+              <dt>Protective check every</dt>
+              <dd>{status.protective_poll_seconds}s{status.protective_backoff_seconds > 0
+                ? ` (backing off to ${status.protective_backoff_seconds}s)` : ""}</dd>
+            </div>
+            <div>
+              <dt>Reporting every</dt>
+              <dd>{status.reporting_poll_seconds}s</dd>
+            </div>
+            <div>
+              {/* Local age from a monotonic clock. NOT a network latency
+                  figure: the terminal's clock and this machine's are not
+                  synchronised, so their difference is not measurable delay. */}
+              <dt>Last quote age (local clock)</dt>
+              <dd>{status.quote_missing
+                ? "no quote"
+                : status.quote_local_age_ms == null ? "—" : `${Math.round(status.quote_local_age_ms)} ms`}</dd>
+            </div>
+            {status.reporting_cycles_skipped > 0 && (
+              <div>
+                <dt>Reporting cycles skipped</dt>
+                <dd>{status.reporting_cycles_skipped}</dd>
+              </div>
+            )}
+          </dl>
+          {status.broker_owner.blocked && (
+            <p className="error-text">
+              ⛔ A broker call ({status.broker_owner.in_flight}) has been running for{" "}
+              {(status.broker_owner.in_flight_ms / 1000).toFixed(1)}s and has not returned.
+              No new exposure until it does, and no second request is sent while the first
+              may still reach the broker.
+            </p>
+          )}
+          {status.broker_owner.last_error && !status.broker_owner.blocked && (
+            <p className="muted">Last broker error: {status.broker_owner.last_error}</p>
+          )}
+        </div>
+      )}
       {grid?.last_event && <p className="cycle-event">{grid.last_event}</p>}
     </section>
   );

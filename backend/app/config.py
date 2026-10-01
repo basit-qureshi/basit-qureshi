@@ -25,6 +25,18 @@ class Settings(BaseSettings):
     # remains, so this exists only to make what is running explicit.
     strategy: str = "grid"
 
+    # Which ENGINE build drives the account: "original" (the bot as it was on
+    # 2 September 2026, commit 5aff68a) or "guarded" (today's). The GRID IS THE
+    # SAME in both - same levels, spacing, lot, basket target and next-candle
+    # gate. What differs is what stands in front of it: the original has no
+    # entry gate at all, no capital floor and no capital reserve, and it judges
+    # the basket on gross profit.
+    #
+    # The default is the ORIGINAL engine, at the owner's explicit request. An
+    # unrecognised value here still resolves to "guarded", because a typo in a
+    # settings file is not that choice being made again.
+    engine_profile: str = "original"
+
     # How often the grid is checked. The basket target is a floor, so a slow
     # poll means closing later than $10 rather than at it.
     poll_interval_seconds: int = 5
@@ -61,6 +73,35 @@ class Settings(BaseSettings):
     # With 50, a $100 account may accept at most a $50 basket stop. It is what
     # stops a small account from accepting a budget it cannot survive.
     grid_capital_reserve_percent: float = 50.0
+    # A persistent line under the account: no new grid is placed while the
+    # balance is at or below it. This is NOT the reserve above. The reserve is
+    # a share of the balance set aside for one proposed basket; the floor is
+    # the level the account must never be traded down past. 0 means the owner
+    # has not chosen one yet, and new entries stay blocked until they do.
+    grid_capital_floor_usd: float = 0.0
+
+    # --- execution cadence (Phase B) -------------------------------------
+    # Protection runs on its own schedule, independent of the M1 candle
+    # boundary and of the dashboard refresh. Chosen from the offline
+    # benchmark: one protective cycle costs about 26 ms of in-process work
+    # against the stated per-call delays, so a 1 s cadence leaves the loop
+    # ~97% idle while still noticing a breach within a second of observing
+    # it. Lower it only with a measurement in hand; a busy loop against the
+    # terminal buys nothing and costs request budget.
+    protective_poll_seconds: float = 1.0
+    # History, settlement, chart data and the websocket frame. Slower on
+    # purpose, and skipped rather than queued when protective work is waiting.
+    reporting_poll_seconds: float = 5.0
+
+    # How long one reporting cycle may take before it defers the rest of its work
+    # to a later cycle, in milliseconds. Reporting runs on the same loop as
+    # protection, so this bounds how long protection can be kept waiting by
+    # anything other than a broker call already in flight.
+    reporting_time_budget_ms: float = 400.0
+    # How long a single broker call may be in flight before the bot reports
+    # itself blocked and refuses new exposure. It never cancels or duplicates
+    # the call - a synchronous terminal call cannot be cancelled by a thread.
+    broker_stall_after_ms: float = 4000.0
     # Tags every order so the bot manages only its own, leaving manual trades
     # and any other program alone.
     grid_magic_number: int = 990022
@@ -75,7 +116,27 @@ class Settings(BaseSettings):
     # broker's zone if its day should roll over at a different hour.
     timezone: str = "Asia/Karachi"
 
+    # --- closing costs: YOUR broker's figures, or UNKNOWN -------------------
+    # These are not defaulted to zero. Left unset they are UNKNOWN, and an
+    # unknown closing cost blocks NEW exposure while existing exposure stays
+    # protected. Nothing here is invented for you.
+    #: Commission the CLOSING side charges, per lot, in account currency. From
+    #: your contract specification or an account statement.
+    exit_commission_per_lot_usd: float | None = None
+    #: Slippage you have actually OBSERVED on this symbol, in points per fill.
+    slippage_points_per_fill: float | None = None
+    #: Whether your broker's floating profit is already struck at the executable
+    #: closing side. "unverified" until you have checked; "yes" or "no" after.
+    #: While it is unverified the exit spread can delay a profit exit but cannot
+    #: bring a loss exit forward.
+    broker_profit_includes_exit_spread: str = "unverified"
+
     database_url: str = "sqlite:///./trading_bot.db"
+
+    # Where a recorded session writes its manifest and event log. Relative to
+    # the backend working directory. Nothing is written here unless a session
+    # is explicitly started.
+    evidence_dir: str = "evidence"
 
 
 settings = Settings()
