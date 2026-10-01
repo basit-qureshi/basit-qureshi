@@ -45,6 +45,17 @@ class ModeUpdate(BaseModel):
     confirm: bool = False
 
 
+class EngineProfileUpdate(BaseModel):
+    """Which engine drives the account: "guarded" or "legacy".
+
+    There is no confirm flag. Selecting the legacy engine is refused while the
+    bot is running, while it owns exposure, or while either profile is halted —
+    conditions a checkbox cannot stand in for.
+    """
+
+    profile: str
+
+
 class TestOrderRequest(BaseModel):
     side: str  # "BUY" or "SELL"
     volume: float = 0.01

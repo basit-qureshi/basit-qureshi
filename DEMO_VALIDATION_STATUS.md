@@ -839,3 +839,115 @@ otherwise. The central risk — both sides filling and the basket freezing near 
 completed-grid estimate — has still never been measured on real price history.
 §B1's tick export remains the only thing that can answer that, and it is
 independent of the demo run: read-only, no orders, no risk settings needed.
+
+---
+
+## 11. Two engines, one strategy — the selectable profile
+
+Added at the owner's request: a toggle that runs **the original bot's engine**
+on one side and the current one on the other, with the strategy unchanged on
+both.
+
+### 11.1 Where the original engine came from
+
+The owner supplied a `bot_backup.zip`. Its central directory lists 18,901
+entries, but only 3,217 local file records are present in the archive body and
+**none of them is a `.py` file** — every backend source entry is missing its
+data. The archive is truncated, not merely mis-offset, so nothing could be read
+from it.
+
+The original engine was recovered from git instead: this repository's own
+`main`, at `1116af1`, which is the commit the working branch is based on. Its
+file list matches the zip's backend listing, and its engine docstring is
+byte-identical to today's — the two were the same project at the same point.
+
+`backend/app/engine/legacy_engine.py` is that file, taken with `git show`, with
+exactly two edits: the class is renamed `LegacyGridEngine` so both engines can
+be imported at once, and a provenance header was prepended.
+`test_the_legacy_file_is_the_pinned_commit_with_two_known_edits` reverses both
+edits and asserts equality against `git show 1116af1:...`, so the vendored copy
+cannot drift.
+
+### 11.2 The claim being made, and the claim that is not
+
+**Claimed, and tested:** the strategy is the same on both sides. Both engines,
+given identical settings, place the same orders at the same prices in the same
+volumes (`test_both_profiles_place_the_identical_grid`), compute the same level
+prices (`test_both_profiles_compute_the_same_level_prices`), and both wait for
+the next M1 candle before the first grid
+(`test_both_profiles_wait_for_the_next_candle_before_the_first_grid`).
+
+**Not claimed anywhere:** that either engine is profitable, or that one trades
+better than the other. `test_the_registry_describes_both_without_a_profit_claim`
+asserts the word does not appear in either description. The reason both are
+runnable is that the comparison has not been made.
+
+### 11.3 What the toggle actually changes
+
+| Mechanism | Guarded | Original |
+| --- | --- | --- |
+| Capital floor | balance gate + equity trigger | absent |
+| Closing-cost contract | unknown inputs block a new basket | half the current spread; commission, swap, slippage excluded |
+| Symbol valuation | unknown tick value / point size / quote refuses entry | error on the tick |
+| Liquidation policy | late exposure cancelled and closed again | absent |
+| Daily limit judged on | marked result incl. floating loss | realised results + equity drawdown |
+| Owner pause | Pause / Resume / Close, separate from Stop | absent |
+
+`test_the_legacy_profile_has_no_capital_floor_gate` demonstrates the difference
+rather than describing it: with no capital floor set, the guarded engine refuses
+and the original admits.
+
+### 11.4 Three decisions that were not obvious
+
+**Separate halt records.** The original keyed persisted risk state as
+`halt:<account>:<symbol>:<magic>:<mode>` — which today's engine reads as one of
+its own *legacy* keys and migrates from. Sharing them would let whichever engine
+ran last overwrite the other's halt. The adapter moves its record under
+`legacyprofile:`. That separation is only safe if switching cannot be used to
+step around a halt, so `set_engine_profile` refuses while **either** engine is
+halted, and refuses outright if a risk record cannot be read.
+
+**Close works on the original; pause does not.** `pause_entries` and
+`resume_entries` refuse there, because the original has no entries-paused latch
+and a button that appears to hold entries and does not is worse than no button.
+`close_and_pause` does work — closing on demand is an owner instruction to the
+broker, not a strategy decision, and leaving an owner unable to flatten from the
+dashboard would be a safety regression introduced by offering the profile at
+all. It stops the management loop first, because otherwise the next candle
+rebuilds the grid and the button is a lie. The returned message says so.
+
+**The account check is the same in both.** `verify_account` — which refuses a
+REAL account sitting behind a local "demo" label — is implemented on the
+original profile too. It is not one of the protections that profile is defined
+by the absence of, and weakening it to make the comparison "fair" would make the
+comparison dangerous instead.
+
+### 11.5 What the adapter may and may not do
+
+`LegacyEngine` subclasses the vendored file and adds reporting, the snapshot
+header, and the owner controls today's API calls. It overrides **no** strategy
+method: `test_the_adapter_overrides_no_strategy_method` checks nineteen of them
+by name and asserts each is still the inherited one, and
+`test_the_adapter_overrides_are_all_declared_plumbing` fails on any new override
+that was not added deliberately to the allowed set.
+
+### 11.6 Verification
+
+```
+backend  python3 -m pytest -q                -> 589 passed  (87 new)
+backend  python3 -m compileall -q app tools  -> OK
+frontend npm test / lint / build             -> 4 passed / no new warnings / clean
+```
+
+### 11.7 What this does not fix
+
+The guarded engine's refusals that the owner is currently hitting — no capital
+floor, closing costs not established, the completed-grid estimate exceeding the
+headroom — are about **settings that are still missing**, not about the engine
+being wrong. Running the original makes those refusals disappear by removing the
+checks, not by answering them. It places the grid the guarded engine declined to
+price.
+
+That is a legitimate thing to want for a comparison. It is not a fix, and the
+dashboard says so on the engine's own card and in a confirmation before the
+switch.

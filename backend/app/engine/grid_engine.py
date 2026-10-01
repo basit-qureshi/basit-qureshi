@@ -62,6 +62,7 @@ from app.engine.instrumentation import (
     new_correlation_id,
 )
 from app.engine import costs, grid_math
+from app.engine import profiles as engine_profiles
 from app.engine.risk_accounting import build_day_risk
 from app.evidence import session as evidence_session
 
@@ -2573,6 +2574,7 @@ class GridEngine:
             {
                 "type": "tick",
                 **self._observation_header(),
+                "engine_profile": engine_profiles.GUARDED,
                 "positions_known": positions_known,
                 "pending_orders_known": pendings_known,
                 "balance": account.balance,
@@ -2631,6 +2633,14 @@ class GridEngine:
             "connected": self.broker.is_connected(),
             "last_error": self._last_error,
             "strategy_name": "GridEngine",
+            # Which ENGINE build is driving the account. The grid is identical in
+            # both profiles; this names how much it refuses to assume. See
+            # app/engine/profiles.py.
+            "engine_profile": engine_profiles.GUARDED,
+            "engine_profile_summary": engine_profiles.GUARDED_PROFILE.summary,
+            "engine_profile_missing": [],
+            "engine_profile_source_commit": None,
+            "settings_not_applied": [],
             "structural": False,
             "grid_mode": True,
             "account_id": self._account_id,

@@ -469,6 +469,48 @@ Record the session while you do this — §F.
 
 ---
 
+## D1. Switching between the two engines
+
+**Settings tab → Engine.** Two choices, and the switch is refused in four states.
+
+The grid is **identical** in both. Same levels, same spacing, same lot, same
+basket target, same next-candle gate — `tests/test_engine_profiles.py` places a
+grid with each and compares them order by order. Switching is not a change of
+strategy. It is a change in how much the engine refuses to assume.
+
+| | Guarded engine (default) | Original engine |
+| --- | --- | --- |
+| Source | current code | this repository at commit `1116af1`, taken from git |
+| Capital floor | entry rule on balance, trigger on equity | **none** |
+| Closing costs | unknown inputs block a new basket | estimated as half the current spread; commission, swap and slippage left out |
+| Symbol valuation | unknown tick value, point size or quote refuses entry | raises an error on the tick instead |
+| After a risk halt | liquidation policy: late exposure cancelled and closed again, across restarts | **none** |
+| Daily limit judged on | marked result, floating loss included | realised results and equity drawdown |
+| Owner pause | Pause / Resume / Close, separate from Stop | **no pause.** Stop ends the loop; Close stops the loop and then flattens |
+
+**The switch is refused while:**
+
+1. the bot is running — stop it first;
+2. this bot owns any position or resting order — a basket opened under one
+   engine must not be inherited by the other;
+3. **either** engine carries an unresolved halt — they keep separate halt
+   records, and switching is not a way around one. Clear it where it was
+   raised, then switch;
+4. the broker cannot be read — unknown is not flat.
+
+**What does not move:** your settings, your trade history, your manual trades.
+Settings the original engine does not read are still stored, and the dashboard
+names them under `settings_not_applied` rather than letting you set a capital
+floor there and believe it is holding.
+
+**Why this exists.** The 843 trades already in your database were produced by
+the original engine. Comparing the two needs both of them runnable. Neither has
+been shown to be profitable, and running the original is not a way to make the
+guarded engine's refusals go away — those refusals are mostly about settings
+that are still missing.
+
+---
+
 ## E. Decisions needed before any forward evaluation can start
 
 These are yours. They are not values to invent.

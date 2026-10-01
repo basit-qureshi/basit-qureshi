@@ -25,6 +25,15 @@ class Settings(BaseSettings):
     # remains, so this exists only to make what is running explicit.
     strategy: str = "grid"
 
+    # Which ENGINE build drives the account: "guarded" (today's) or "legacy"
+    # (the engine as it was at commit 1116af1). The grid is identical in both —
+    # same levels, spacing, lot, basket target and candle gate. What differs is
+    # how much has to be known and set before a grid may be placed, and what
+    # happens to exposure after a limit is breached. Defaults to the guarded one
+    # and an unrecognised value resolves to it as well, because a typo must not
+    # select the profile with fewer refusals.
+    engine_profile: str = "guarded"
+
     # How often the grid is checked. The basket target is a floor, so a slow
     # poll means closing later than $10 rather than at it.
     poll_interval_seconds: int = 5

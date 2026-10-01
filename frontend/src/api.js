@@ -21,6 +21,9 @@ export const api = {
   pauseEntries: () => request("/api/pause-entries", { method: "POST" }),
   resumeEntries: () => request("/api/resume-entries", { method: "POST" }),
   closeAndPause: () => request("/api/close-and-pause", { method: "POST" }),
+  getEngineProfile: () => request("/api/engine-profile"),
+  setEngineProfile: (profile) =>
+    request("/api/engine-profile", { method: "POST", body: JSON.stringify({ profile }) }),
   // Every filter is optional; blanks are dropped so the query string only
   // carries what was actually chosen.
   getTrades: (params = {}) => {

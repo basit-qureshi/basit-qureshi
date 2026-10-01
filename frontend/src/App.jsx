@@ -11,6 +11,7 @@ import ManualTestPanel from "./components/ManualTestPanel";
 import Toasts from "./components/Toasts";
 import PakistanClock from "./components/PakistanClock";
 import GridPanel from "./components/GridPanel";
+import EngineProfileToggle from "./components/EngineProfileToggle";
 import OpenTradesPanel from "./components/OpenTradesPanel";
 import "./App.css";
 
@@ -278,6 +279,22 @@ export default function App() {
     }
   }
 
+  async function handleEngineProfile(profile) {
+    setBusy(true);
+    try {
+      const result = await api.setEngineProfile(profile);
+      // The whole screen is rebuilt around a different engine, so every live
+      // reading is re-fetched rather than left showing the previous one's.
+      snapshotRef.current = { seq: -1, account: null };
+      setGrid(null);
+      setLiveOpenPositions(null);
+      await refresh();
+      pushToast("info", "Engine switched", result.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function handleSaveSettings(newSettings) {
     try {
       await api.updateSettings(newSettings);
@@ -350,7 +367,10 @@ export default function App() {
       {tab === "backtest" && <BacktestPanel onRun={api.runBacktest} />}
 
       {tab === "settings" && (
-        <SettingsPanel settings={status?.settings} running={status?.running} onSave={handleSaveSettings} />
+        <>
+          <EngineProfileToggle status={status} busy={busy} onSwitch={handleEngineProfile} />
+          <SettingsPanel settings={status?.settings} running={status?.running} onSave={handleSaveSettings} />
+        </>
       )}
     </div>
   );

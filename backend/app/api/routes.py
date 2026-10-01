@@ -4,13 +4,21 @@ import pandas as pd
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import and_, or_
 
-from app.api.schemas import BacktestRequest, ModeUpdate, SettingsUpdate, StartRequest, TestOrderRequest
+from app.api.schemas import (
+    BacktestRequest,
+    EngineProfileUpdate,
+    ModeUpdate,
+    SettingsUpdate,
+    StartRequest,
+    TestOrderRequest,
+)
 from app.backtest.backtester import run_grid_backtest
 from app.bot_manager import bot_manager
 from app.brokers.base import OrderSide, PendingType
 from app.config import settings
 from app import db as db_module
 from app.db import TradeRecord
+from app.engine import profiles as engine_profiles
 from app.strategy import profiles as strategy_profiles
 from app.strategy.indicators import ema
 
@@ -644,6 +652,42 @@ async def update_settings(body: SettingsUpdate):
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     return bot_manager.settings
+
+
+@router.get("/engine-profile")
+def get_engine_profile():
+    """Which engine is driving the account, and what the choice actually means.
+
+    The two descriptions are served from one place so the dashboard cannot
+    describe a profile differently from the API, and so the difference is
+    readable before it is selected rather than after.
+    """
+    active = bot_manager.engine_profile()
+    return {
+        "active": active,
+        "active_detail": engine_profiles.describe(active),
+        "profiles": [p.as_dict() for p in engine_profiles.ALL_PROFILES.values()],
+        "switchable": not bot_manager.engine.running,
+        "note": (
+            "The grid is identical in both profiles: same levels, spacing, lot, basket target and "
+            "next-candle gate. Switching changes how much the engine refuses to assume, not what "
+            "it trades. Neither profile has been shown to be profitable."
+        ),
+    }
+
+
+@router.post("/engine-profile")
+def set_engine_profile(body: EngineProfileUpdate):
+    """Switch engines. Refuses while running, while exposure is open, or while
+    either profile carries an unresolved halt — the reasons are in
+    `BotManager.set_engine_profile`."""
+    try:
+        result = bot_manager.set_engine_profile(body.profile)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"ok": True, **result, "active_detail": engine_profiles.describe(result["profile"])}
 
 
 @router.post("/mode")
