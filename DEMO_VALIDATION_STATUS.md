@@ -842,112 +842,148 @@ independent of the demo run: read-only, no orders, no risk settings needed.
 
 ---
 
-## 11. Two engines, one strategy — the selectable profile
+## 11. The 2 September bot, restored as the default
 
-Added at the owner's request: a toggle that runs **the original bot's engine**
-on one side and the current one on the other, with the strategy unchanged on
-both.
+Added at the owner's request, in two rounds. The first round got the date wrong
+and is superseded; what follows describes what is in the repository now.
 
-### 11.1 Where the original engine came from
+### 11.1 The first attempt, and why it was wrong
 
-The owner supplied a `bot_backup.zip`. Its central directory lists 18,901
-entries, but only 3,217 local file records are present in the archive body and
-**none of them is a `.py` file** — every backend source entry is missing its
-data. The archive is truncated, not merely mis-offset, so nothing could be read
-from it.
+The owner asked for "the old bot". A supplied `bot_backup.zip` was unreadable —
+its central directory lists 18,901 entries, but only 3,217 local file records
+are present in the archive body and **none of them is a `.py` file**, so every
+backend source entry is missing its data. The engine was therefore taken from
+git instead, and the commit chosen was `1116af1`: the base of this branch.
 
-The original engine was recovered from git instead: this repository's own
-`main`, at `1116af1`, which is the commit the working branch is based on. Its
-file list matches the zip's backend listing, and its engine docstring is
-byte-identical to today's — the two were the same project at the same point.
+That was wrong. `1116af1` already contains `0b86408` (20 September), which is
+where the capital reserve, the completed-grid refusal and the whole `_entry_gate`
+were added. The profile shipped in `2423963` therefore still refused on exactly
+the arithmetic the owner was complaining about — a fact one of its own tests
+asserted (`test_the_legacy_profile_still_refuses_a_grid_bigger_than_its_budget`).
 
-`backend/app/engine/legacy_engine.py` is that file, taken with `git show`, with
-exactly two edits: the class is renamed `LegacyGridEngine` so both engines can
-be imported at once, and a provenance header was prepended.
-`test_the_legacy_file_is_the_pinned_commit_with_two_known_edits` reverses both
-edits and asserts equality against `git show 1116af1:...`, so the vendored copy
-cannot drift.
+The owner corrected it: the bot they want is the one from **2 September**. That
+is `5aff68a`, the last commit before the 15 and 20 September rounds.
+`1116af1`'s vendored copy and its adapter were deleted rather than kept as a
+third choice — a profile nobody asked for, carrying the exact gate being
+complained about, is worse than no profile.
 
-### 11.2 The claim being made, and the claim that is not
+### 11.2 What is vendored now
 
-**Claimed, and tested:** the strategy is the same on both sides. Both engines,
-given identical settings, place the same orders at the same prices in the same
-volumes (`test_both_profiles_place_the_identical_grid`), compute the same level
-prices (`test_both_profiles_compute_the_same_level_prices`), and both wait for
-the next M1 candle before the first grid
-(`test_both_profiles_wait_for_the_next_candle_before_the_first_grid`).
+`backend/app/engine/original_engine.py` is this repository's
+`backend/app/engine/grid_engine.py` at `5aff68a`, taken with `git show`, with
+exactly two edits: the class is renamed `OriginalGridEngine`, and a provenance
+header was prepended. `test_the_vendored_file_is_the_pinned_commit_with_two_known_edits`
+reverses both and asserts equality against the commit, so the copy cannot drift.
+
+It genuinely has no gate. `test_the_vendored_engine_really_has_no_entry_gate`
+asserts that `_entry_gate`, `_affordability`, `_completed_grid_loss`,
+`capital_reserve_percent` and `capital_floor_usd` are all absent from the class,
+and that neither `capital_reserve` nor `capital_floor` appears anywhere in the
+file below the header.
+
+### 11.3 It is now the default
+
+`ENGINE_PROFILE` defaults to `original`, and a fresh install runs the
+2 September bot. The guarded engine is the opt-in.
+
+One asymmetry, deliberate and tested: an **unrecognised** value resolves to
+`guarded`, not to the default. A typo in a settings file, or a value written by
+a future version, must not be how an engine with no entry gate gets selected —
+only an explicit choice does that. `test_an_unrecognised_profile_resolves_to_the_GUARDED_one`
+pins it.
+
+### 11.4 The claim being made, and the claim that is not
+
+**Claimed, and tested:** the grid is the same. Both engines, given identical
+settings, place the same orders at the same prices in the same volumes
+(`test_both_engines_place_the_identical_grid`), use the same first step and
+spacing, and both wait for the next M1 candle before the first grid.
+
+**Also claimed, and tested:** the difference is admission, not strategy. On the
+owner's own numbers — $195.24 balance, $170 floor, 10+10 at 0.01 lots — the
+guarded engine refuses on headroom and the 2 September bot places all 20 orders
+(`test_the_original_trades_the_account_the_guarded_engine_refuses`).
 
 **Not claimed anywhere:** that either engine is profitable, or that one trades
-better than the other. `test_the_registry_describes_both_without_a_profit_claim`
-asserts the word does not appear in either description. The reason both are
-runnable is that the comparison has not been made.
+better. `test_the_registry_describes_both_and_claims_nothing_about_profit`
+asserts the word appears in neither description.
 
-### 11.3 What the toggle actually changes
+### 11.5 What the 2 September bot does not have, stated on screen
 
-| Mechanism | Guarded | Original |
+| Mechanism | Guarded | 2 September |
 | --- | --- | --- |
-| Capital floor | balance gate + equity trigger | absent |
-| Closing-cost contract | unknown inputs block a new basket | half the current spread; commission, swap, slippage excluded |
-| Symbol valuation | unknown tick value / point size / quote refuses entry | error on the tick |
-| Liquidation policy | late exposure cancelled and closed again | absent |
+| Entry gate | capital floor, capital reserve, completed-grid refusal, closing-cost requirement, symbol valuation | **none at all** |
+| Basket target judged on | net, minus a conservative exit estimate | **gross** — swap and commission are not in it |
+| Halt | durable, survives a restart | **in memory only; `start()` clears it** |
+| Liquidation policy | yes | no |
 | Daily limit judged on | marked result incl. floating loss | realised results + equity drawdown |
-| Owner pause | Pause / Resume / Close, separate from Stop | absent |
+| Owner pause | Pause / Resume / Close | none; Close stops the loop, then flattens |
+| Trading window | converted into the configured timezone | compared against the machine's UTC hour |
 
-`test_the_legacy_profile_has_no_capital_floor_gate` demonstrates the difference
-rather than describing it: with no capital floor set, the guarded engine refuses
-and the original admits.
+That list is served from the engine itself (`engine_profile_missing`) and
+printed verbatim by the dashboard, so the screen cannot describe the choice
+differently from the API.
 
-### 11.4 Three decisions that were not obvious
+### 11.6 Four decisions that were not obvious
 
-**Separate halt records.** The original keyed persisted risk state as
-`halt:<account>:<symbol>:<magic>:<mode>` — which today's engine reads as one of
-its own *legacy* keys and migrates from. Sharing them would let whichever engine
-ran last overwrite the other's halt. The adapter moves its record under
-`legacyprofile:`. That separation is only safe if switching cannot be used to
-step around a halt, so `set_engine_profile` refuses while **either** engine is
-halted, and refuses outright if a risk record cannot be read.
+**The account bucket.** The vendored engine writes `TradeRecord` rows without an
+account id, and the column defaults to `legacy`. `_account_id` is pinned to
+`legacy` to match, so the dashboard reads the bucket the engine writes — and the
+existing trade history, which `init_db` backfilled to `legacy`, stays visible.
+Binding the broker's real identity instead would have made the engine write one
+bucket and the dashboard read another.
 
-**Close works on the original; pause does not.** `pause_entries` and
-`resume_entries` refuse there, because the original has no entries-paused latch
-and a button that appears to hold entries and does not is worse than no button.
-`close_and_pause` does work — closing on demand is an owner instruction to the
-broker, not a strategy decision, and leaving an owner unable to flatten from the
-dashboard would be a safety regression introduced by offering the profile at
-all. It stops the management loop first, because otherwise the next candle
-rebuilds the grid and the button is a lie. The returned message says so.
+**`clear_halt` does not refuse.** The guarded engine refuses to clear a halt
+while exposure is open, because its halt is durable and clearing one over live
+positions turns a breach into a larger one. Here there is nothing durable to
+refuse on — this engine's own `start()` clears the halt — so refusing the button
+while Start does it silently would be theatre. The message says what the halt
+actually is instead.
 
-**The account check is the same in both.** `verify_account` — which refuses a
-REAL account sitting behind a local "demo" label — is implemented on the
-original profile too. It is not one of the protections that profile is defined
-by the absence of, and weakening it to make the comparison "fair" would make the
-comparison dangerous instead.
+**Close works; pause does not.** `pause_entries` and `resume_entries` refuse,
+because this engine has no latch and a button that appears to hold entries and
+does not is worse than no button. `close_and_pause` does work — closing on
+demand is an owner instruction to the broker, not a strategy decision, and
+leaving an owner unable to flatten from the dashboard would be a safety
+regression introduced by offering the profile at all. It stops the management
+loop first, because otherwise the next candle rebuilds the grid and the button
+is a lie.
 
-### 11.5 What the adapter may and may not do
+**`session_label()` says UTC.** This engine's `_within_session` reads the
+machine's UTC hour directly, where today's converts into the configured zone
+first. The label printed on the dashboard says UTC because that is what the
+comparison actually uses; printing "Karachi" over a UTC comparison would be a
+five-hour lie.
 
-`LegacyEngine` subclasses the vendored file and adds reporting, the snapshot
+### 11.7 What the adapter may and may not do
+
+`OriginalEngine` subclasses the vendored file and adds reporting, the snapshot
 header, and the owner controls today's API calls. It overrides **no** strategy
 method: `test_the_adapter_overrides_no_strategy_method` checks nineteen of them
-by name and asserts each is still the inherited one, and
+by name — including the trade-recording and daily-accounting methods they depend
+on — and asserts each is still the inherited one.
 `test_the_adapter_overrides_are_all_declared_plumbing` fails on any new override
 that was not added deliberately to the allowed set.
 
-### 11.6 Verification
+### 11.8 Verification
 
 ```
-backend  python3 -m pytest -q                -> 589 passed  (87 new)
+backend  python3 -m pytest -q                -> 600 passed  (98 on the two engines)
 backend  python3 -m compileall -q app tools  -> OK
 frontend npm test / lint / build             -> 4 passed / no new warnings / clean
 ```
 
-### 11.7 What this does not fix
+### 11.9 What this does not fix, said plainly
 
-The guarded engine's refusals that the owner is currently hitting — no capital
-floor, closing costs not established, the completed-grid estimate exceeding the
-headroom — are about **settings that are still missing**, not about the engine
-being wrong. Running the original makes those refusals disappear by removing the
-checks, not by answering them. It places the grid the guarded engine declined to
-price.
+The refusals the owner was hitting — no capital floor, closing costs not
+established, the completed-grid estimate exceeding the headroom — were about
+**settings that are still missing and an account that is small for the grid**,
+not about the engine being wrong. The 2 September bot removes the checks rather
+than answering them. It places the grid the guarded engine declined to price.
 
-That is a legitimate thing to want for a comparison. It is not a fix, and the
-dashboard says so on the engine's own card and in a confirmation before the
-switch.
+The underlying numbers have not changed: a fully filled 10+10 grid at 0.01 lots
+on a $195 account still freezes around $46 of loss on the owner's current spread
+— roughly a quarter of the account — and the 843 trades this engine produced
+still show a profit factor of 0.47. Running it again is a comparison, not a
+result. The dashboard says so on the engine's own card and in a confirmation
+before the switch, and nothing in this repository claims otherwise.

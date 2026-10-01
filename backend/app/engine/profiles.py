@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 GUARDED = "guarded"
-LEGACY = "legacy"
+ORIGINAL = "original"
 
 
 @dataclass(frozen=True)
@@ -67,33 +67,42 @@ GUARDED_PROFILE = EngineProfile(
     guarded=True,
 )
 
-LEGACY_PROFILE = EngineProfile(
-    key=LEGACY,
-    label="Original engine (1116af1)",
+ORIGINAL_PROFILE = EngineProfile(
+    key=ORIGINAL,
+    label="Original bot (2 Sep 2026)",
     summary=(
-        "The engine exactly as it was before any of that existed, taken from "
-        "git rather than rewritten. It is what produced the trade history "
-        "already in this database, which is the only reason to be able to run "
-        "it: a comparison needs both sides."
+        "The bot as it was at commit 5aff68a, taken from git rather than "
+        "rewritten. It has no entry gate at all: a grid is placed whenever "
+        "nothing of this bot's is open and the next M1 candle has arrived. It "
+        "is what produced the trade history already in this database."
     ),
     adds=(),
     guarded=False,
 )
 
-ALL_PROFILES = {p.key: p for p in (GUARDED_PROFILE, LEGACY_PROFILE)}
-DEFAULT_PROFILE = GUARDED
+ALL_PROFILES = {p.key: p for p in (GUARDED_PROFILE, ORIGINAL_PROFILE)}
+
+#: The engine a fresh install runs. It is the ORIGINAL one, chosen by the owner:
+#: they asked for the bot they had on 2 September, without the capital floor and
+#: the capital reserve that refuse a grid on a small account. `normalise` below
+#: still resolves an UNRECOGNISED value to the guarded engine rather than to
+#: this one, because a typo in a settings file is not that choice being made
+#: again.
+DEFAULT_PROFILE = ORIGINAL
 
 
 def normalise(value) -> str:
     """The profile key for a stored or submitted value.
 
-    An unrecognised value becomes the GUARDED profile, never the legacy one. A
-    settings file written by a future version, or a typo in an API call, must
-    not be a way to end up running with fewer refusals than the owner chose.
+    An unrecognised value becomes the GUARDED profile, never the original one -
+    which is NOT the same as `DEFAULT_PROFILE`, and deliberately so. A settings
+    file written by a future version, or a typo in an API call, must not be a
+    way to end up running with fewer refusals; only an explicit choice selects
+    the engine that has none.
     """
     if isinstance(value, str) and value.strip().lower() in ALL_PROFILES:
         return value.strip().lower()
-    return DEFAULT_PROFILE
+    return GUARDED
 
 
 def describe(key: str) -> dict:

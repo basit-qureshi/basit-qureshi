@@ -20,12 +20,12 @@ export default function StatusBar({
   // Named by the engine from the strategy object it is actually holding, not
   // from the settings dict — so a saved setting that quietly disagrees with the
   // dashboard shows up here instead of only in the shape of the trades.
-  const STRATEGY_LABELS = { GridEngine: "Grid", LegacyGridEngine: "Grid" };
+  const STRATEGY_LABELS = { GridEngine: "Grid", OriginalGridEngine: "Grid" };
   const strategyLabel = STRATEGY_LABELS[strategy_name] || strategy_name;
   // The grid is the same either way, so this is NOT a second strategy label.
   // It says which engine is in front of that grid, and it sits on the main bar
   // rather than only in Settings because the difference is what refuses a trade.
-  const onLegacy = engine_profile === "legacy";
+  const onOriginal = engine_profile === "original";
 
   function handleModeToggle() {
     const nextMode = mode === "demo" ? "real" : "demo";
@@ -63,7 +63,7 @@ export default function StatusBar({
         <span className={`badge ${mode === "real" ? "badge-real" : "badge-demo"}`}>
           {mode === "real" ? "REAL MONEY" : "DEMO"}
         </span>
-        {onLegacy && (
+        {onOriginal && (
           <span className="badge badge-real" title="The engine as it was at commit 1116af1: no capital floor, no closing-cost contract, no liquidation policy, no owner pause.">
             ORIGINAL ENGINE
           </span>
@@ -98,15 +98,15 @@ export default function StatusBar({
         {/* Three distinct actions, because they do three different things.
             Pause keeps protecting. Close flattens this bot's own exposure.
             Stop ends the management loop and protects nothing after that. */}
-        {/* The original engine has no owner pause, so the buttons are not shown
+        {/* The 2 September bot has no owner pause, so the buttons are not shown
             on it. Showing one that always refuses would be worse than its
             absence: it would suggest protection that is not there. */}
-        {!onLegacy && running && !entries_paused && (
+        {!onOriginal && running && !entries_paused && (
           <button className="btn btn-ghost" disabled={busy} onClick={onPauseEntries}>
             Pause entries
           </button>
         )}
-        {!onLegacy && running && entries_paused && (
+        {!onOriginal && running && entries_paused && (
           <button className="btn btn-ghost" disabled={busy} onClick={onResumeEntries}>
             Resume entries
           </button>
@@ -165,13 +165,13 @@ export default function StatusBar({
           message={
             "This closes only positions and orders carrying this bot's magic number. Manual trades and " +
             "other programs are not touched. " +
-            (onLegacy
-              ? "The original engine has no pause that keeps entries shut while the loop runs, so the " +
+            (onOriginal
+              ? "The 2 September bot has no pause that keeps entries shut while the loop runs, so the " +
                 "management loop is STOPPED as part of this. Pressing Start again builds a fresh grid " +
                 "on the next candle."
               : "It stays active until the broker confirms nothing is left.")
           }
-          confirmLabel={onLegacy ? "Yes, close and stop" : "Yes, close and pause"}
+          confirmLabel={onOriginal ? "Yes, close and stop" : "Yes, close and pause"}
           danger
           onConfirm={() => {
             onCloseAndPause();

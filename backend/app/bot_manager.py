@@ -11,7 +11,7 @@ from app.config import settings
 from app import db as db_module
 from app.db import TradeRecord, init_db
 from app.engine.grid_engine import GridEngine
-from app.engine.legacy_adapter import LegacyEngine
+from app.engine.original_adapter import OriginalEngine
 from app.engine import profiles as engine_profiles
 
 _SETTINGS_FILE = Path(__file__).resolve().parent.parent / "runtime_settings.json"
@@ -106,7 +106,9 @@ class BotManager:
         instead of appearing to hold.
         """
         s = self.settings
-        build = LegacyEngine if engine_profiles.normalise(s.get("engine_profile")) == engine_profiles.LEGACY else GridEngine
+        build = (OriginalEngine
+                 if engine_profiles.normalise(s.get("engine_profile")) == engine_profiles.ORIGINAL
+                 else GridEngine)
         return build(
             broker=self.broker,
             symbol=s["symbol"],
@@ -181,11 +183,11 @@ class BotManager:
           basket opened under one and inherited by the other would be managed by
           rules it was never admitted under, and the profile that placed it
           would no longer be the profile answering for it.
-        * **An unresolved halt, in EITHER profile.** The two keep separate halt
-          records so neither can clear the other's (see
-          `legacy_adapter._risk_key`). That separation is only safe if switching
-          cannot be used to step around a halt, so a halt anywhere blocks the
-          switch until an owner clears it where it was raised.
+        * **An unresolved halt.** The active engine's halt always blocks, and
+          the guarded engine's halt is durable, so switching away from it and
+          back would otherwise be a way to step around one. The original engine
+          persists no halt at all, so there is nothing of its own to check -
+          `_stored_halt_reason` says so rather than guessing.
         * **An unreadable broker.** Unknown is not flat.
 
         Returns what changed. Raises RuntimeError with the reason otherwise.
@@ -237,36 +239,47 @@ class BotManager:
         }
 
     def _halt_blocking_switch(self, target: str) -> str | None:
-        """An unresolved halt in either profile, named with where to clear it.
+        """An unresolved halt on either side of the switch, named with where to
+        clear it.
 
-        The active engine is asked directly. The other profile's record is read
-        from the database without building an engine, because building one is
-        what the caller is trying to decide whether to do.
+        Two separate checks, and both are needed:
+
+        * The engine running NOW. Leaving a halt behind by walking away from it
+          is the obvious way around one.
+        * The engine being switched TO. Its record is read from the database
+          without building an engine, because building one is what the caller is
+          trying to decide whether to do. Arriving at an engine that is already
+          halted would start the new session halted, with no indication of why.
         """
         if getattr(self.engine, "_halt_reason", None):
             return (
                 f"Not switched: this engine is halted — {self.engine._halt_reason} Clear the halt "
                 "here first. Switching engines is not a way past a halt."
             )
-        other = engine_profiles.GUARDED if target != engine_profiles.GUARDED else engine_profiles.LEGACY
-        reason = self._stored_halt_reason(other)
+        reason = self._stored_halt_reason(target)
         if reason:
             return (
-                f"Not switched: the {engine_profiles.ALL_PROFILES[other].label} has an unresolved "
-                f"halt — {reason} Switch to that profile, clear it there, then switch back."
+                f"Not switched: the {engine_profiles.ALL_PROFILES[target].label} has an unresolved "
+                f"halt — {reason} It would start halted. Clear it there first."
             )
         return None
 
     def _stored_halt_reason(self, profile: str) -> str | None:
+        """An unresolved halt that profile would come back to, or None.
+
+        The original engine keeps its halt in memory only - `start()` clears it
+        and a restart does not restore it - so it has no stored record to read
+        and nothing of its own can block a switch. The guarded engine's halt is
+        durable, and is read here without building an engine, because building
+        one is what the caller is trying to decide whether to do.
+        """
+        if profile == engine_profiles.ORIGINAL:
+            return None
         engine = self.engine
         account_id = getattr(engine, "_account_id", "legacy")
-        if profile == engine_profiles.LEGACY:
-            keys = [f"legacyprofile:halt:{account_id}:{engine.symbol}:{engine.magic_number}:{m}"
-                    for m in ("demo", "real")]
-        else:
-            keys = [f"halt:{account_id}:{engine.symbol}:{engine.magic_number}"]
-            keys += [f"halt:{account_id}:{engine.symbol}:{engine.magic_number}:{m}"
-                     for m in ("demo", "real")]
+        keys = [f"halt:{account_id}:{engine.symbol}:{engine.magic_number}"]
+        keys += [f"halt:{account_id}:{engine.symbol}:{engine.magic_number}:{m}"
+                 for m in ("demo", "real")]
         for key in keys:
             try:
                 saved = db_module.load_risk(key) or {}

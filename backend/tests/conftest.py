@@ -259,18 +259,18 @@ def engine_factory(broker):
 
 
 @pytest.fixture
-def legacy_engine_factory(broker):
-    """The ORIGINAL engine, built from the same double as the guarded one.
+def original_engine_factory(broker):
+    """The 2 September engine, built from the same double as the guarded one.
 
-    It takes no capital floor and no closing-cost inputs because it predates
-    both; passing them anyway is allowed and lands in `ignored_settings`, which
-    is itself asserted in test_engine_profiles.py.
+    It takes no capital floor, no capital reserve and no closing-cost inputs
+    because it predates all of them; passing them anyway is allowed and lands in
+    `ignored_settings`, which is itself asserted in test_engine_profiles.py.
     """
-    from app.engine.legacy_adapter import LegacyEngine
+    from app.engine.original_adapter import OriginalEngine
 
     def _make(**kw):
         kw.setdefault("magic_number", MAGIC)
-        return LegacyEngine(broker=broker, symbol="XAUUSD", mode="demo", **kw)
+        return OriginalEngine(broker=broker, symbol="XAUUSD", mode="demo", **kw)
 
     return _make
 
