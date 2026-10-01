@@ -369,7 +369,12 @@ export default function App() {
       {tab === "settings" && (
         <>
           <EngineProfileToggle status={status} busy={busy} onSwitch={handleEngineProfile} />
-          <SettingsPanel settings={status?.settings} running={status?.running} onSave={handleSaveSettings} />
+          <SettingsPanel
+            settings={status?.settings}
+            running={status?.running}
+            engineProfile={status?.engine_profile}
+            onSave={handleSaveSettings}
+          />
         </>
       )}
     </div>

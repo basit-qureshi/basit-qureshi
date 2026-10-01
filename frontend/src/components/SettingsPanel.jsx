@@ -2,7 +2,16 @@ import { useEffect, useState } from "react";
 
 const SYMBOLS = ["XAUUSD", "XAUUSDm"];
 
-export default function SettingsPanel({ settings, running, onSave, saving }) {
+/**
+ * `engineProfile` decides which fields are shown.
+ *
+ * The original bot predates the capital reserve and the capital floor and never
+ * reads them. Leaving them on screen while it runs would let an owner set a
+ * floor, save it, and believe it was holding — the single most misleading thing
+ * this panel could do. They are hidden on that engine and shown again on the
+ * guarded one, where they are read; the stored values are untouched either way.
+ */
+export default function SettingsPanel({ settings, running, onSave, saving, engineProfile }) {
   const [form, setForm] = useState(settings || {});
   const [dirty, setDirty] = useState(false);
 
@@ -22,10 +31,13 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
 
   const levels = Number(form.grid_buy_stop_levels || 0) + Number(form.grid_sell_stop_levels || 0);
   const maxLots = (levels * Number(form.grid_lot_size || 0)).toFixed(2);
+  // Settings that arrived with the risk work. The original bot does not read
+  // them, so it does not show them.
+  const showRiskWorkSettings = engineProfile !== "original";
 
   async function handleSubmit(e) {
     e.preventDefault();
-    const ok = await onSave({
+    const base = {
       symbol: form.symbol,
       poll_interval_seconds: Number(form.poll_interval_seconds),
       grid_lot_size: Number(form.grid_lot_size),
@@ -38,12 +50,22 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
       grid_max_open_positions: Number(form.grid_max_open_positions),
       grid_max_daily_loss_usd: Number(form.grid_max_daily_loss_usd),
       grid_max_equity_drawdown_percent: Number(form.grid_max_equity_drawdown_percent),
-      grid_capital_reserve_percent: Number(form.grid_capital_reserve_percent),
-      grid_capital_floor_usd: Number(form.grid_capital_floor_usd),
       grid_magic_number: Number(form.grid_magic_number),
       grid_trading_start_hour: Number(form.grid_trading_start_hour),
       grid_trading_end_hour: Number(form.grid_trading_end_hour),
-    });
+    };
+    // Sent only when they are on screen. Submitting a field the owner cannot
+    // see is how a hidden value silently becomes whatever the form happened to
+    // be holding.
+    const ok = await onSave(
+      showRiskWorkSettings
+        ? {
+            ...base,
+            grid_capital_reserve_percent: Number(form.grid_capital_reserve_percent),
+            grid_capital_floor_usd: Number(form.grid_capital_floor_usd),
+          }
+        : base
+    );
     if (ok) setDirty(false); // keep unsaved edits on screen if the save was rejected
   }
 
@@ -52,6 +74,13 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
       <h3>Grid Settings</h3>
       <p className="muted">Every order uses the same lot size. When combined basket profit reaches the target, all bot positions close, remaining orders are cancelled, and a fresh grid starts on the same candle.</p>
       <p className="muted">Startup, manual grid removal and loss exits still wait for the next candle. The daily target and existing risk limits can pause a new cycle.</p>
+      {!showRiskWorkSettings && (
+        <p className="muted">
+          Running the original bot, so the capital reserve and the capital floor are not shown:
+          it does not read them. Any values you saved are kept and apply again on the guarded
+          engine.
+        </p>
+      )}
       <div className="settings-summary"><span>{levels} pending levels</span><span>{maxLots} total lots if all fill</span><span>Display time: Pakistan (UTC+5)</span></div>
       {running && <p className="muted">Stop the bot to change settings.</p>}
       <form className="settings-form" onSubmit={handleSubmit}>
@@ -169,32 +198,36 @@ export default function SettingsPanel({ settings, running, onSave, saving }) {
             onChange={(e) => update("grid_max_daily_loss_usd", e.target.value)}
           />
         </label>
-        <label>
-          Capital reserve (%, untouchable)
-          <input
-            disabled={running}
-            type="number"
-            step="5"
-            min="0"
-            max="95"
-            value={form.grid_capital_reserve_percent}
-            onChange={(e) => update("grid_capital_reserve_percent", e.target.value)}
-          />
-        </label>
-        <label>
-          {/* A different question from the reserve above: the reserve is a
-              share of the balance set aside for ONE proposed basket; the floor
-              is the level the account must never be traded down past. */}
-          Capital floor ($, never trade below)
-          <input
-            disabled={running}
-            type="number"
-            step="1"
-            min="0"
-            value={form.grid_capital_floor_usd}
-            onChange={(e) => update("grid_capital_floor_usd", e.target.value)}
-          />
-        </label>
+        {showRiskWorkSettings && (
+          <>
+            <label>
+              Capital reserve (%, untouchable)
+              <input
+                disabled={running}
+                type="number"
+                step="5"
+                min="0"
+                max="95"
+                value={form.grid_capital_reserve_percent}
+                onChange={(e) => update("grid_capital_reserve_percent", e.target.value)}
+              />
+            </label>
+            <label>
+              {/* A different question from the reserve above: the reserve is a
+                  share of the balance set aside for ONE proposed basket; the
+                  floor is the level the account must never be traded down past. */}
+              Capital floor ($, never trade below)
+              <input
+                disabled={running}
+                type="number"
+                step="1"
+                min="0"
+                value={form.grid_capital_floor_usd}
+                onChange={(e) => update("grid_capital_floor_usd", e.target.value)}
+              />
+            </label>
+          </>
+        )}
         <label>
           Max equity drawdown (%)
           <input

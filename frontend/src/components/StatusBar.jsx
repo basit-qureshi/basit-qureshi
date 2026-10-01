@@ -166,7 +166,7 @@ export default function StatusBar({
             "This closes only positions and orders carrying this bot's magic number. Manual trades and " +
             "other programs are not touched. " +
             (onOriginal
-              ? "The 2 September bot has no pause that keeps entries shut while the loop runs, so the " +
+              ? "The original bot has no pause that keeps entries shut while the loop runs, so the " +
                 "management loop is STOPPED as part of this. Pressing Start again builds a fresh grid " +
                 "on the next candle."
               : "It stays active until the broker confirms nothing is left.")

@@ -1,6 +1,6 @@
-"""What makes the 2 September engine runnable inside today's application.
+"""What makes the original engine runnable inside today's application.
 
-`OriginalGridEngine` is this repository's engine at `5aff68a`. The API and the
+`OriginalGridEngine` is this repository's engine at `1c7d62d`. The API and the
 dashboard have moved on since then: they call methods that engine never had, and
 read status keys it never produced. This subclass supplies exactly that surface
 and nothing else.
@@ -31,11 +31,15 @@ would otherwise discover the hard way:
    loss or drawdown halt. That is the behaviour of the commit, not an oversight
    here, and `clear_halt` below does not pretend otherwise.
 
-4. **Trades are recorded under the `legacy` account bucket**, because that is
-   what the vendored engine writes — it stamps no account id, and the column
-   defaults to `legacy`. `_account_id` is pinned to match, so the dashboard
-   reads the same bucket the engine writes, and the trade history already in the
-   database (which this engine produced) stays visible.
+4. **Same-candle restart after a profitable basket.** The replacement grid is
+   built in the same tick that confirmed the close, instead of waiting for the
+   next M1 candle. Startup, a manually removed grid and a loss exit still wait.
+   That is the behaviour of this commit and it is the reason this commit was
+   chosen; nothing here implements it, it is simply not overridden.
+
+Trade history needs no special handling: this commit already binds the broker's
+account identity and stamps it on every row, so the dashboard reads the bucket
+the engine writes.
 """
 
 from __future__ import annotations
@@ -52,9 +56,10 @@ logger = logging.getLogger("original_engine")
 PROFILE_KEY = "original"
 
 PROFILE_SUMMARY = (
-    "The bot as it was on 2 September 2026. The grid is placed whenever nothing "
-    "of this bot's is open and the next M1 candle has arrived — there is no "
-    "entry gate of any kind in front of it."
+    "The bot as it was before the risk work started (commit 1c7d62d, "
+    "15 September 2026). There is no entry gate of any kind in front of the "
+    "grid, and a profitable basket is replaced on the same candle that closed "
+    "it rather than on the next one."
 )
 
 #: Protection present in the guarded profile and ABSENT here. The dashboard
@@ -63,7 +68,7 @@ PROFILE_SUMMARY = (
 PROFILE_MISSING = (
     "no entry gate at all: no capital floor, no capital reserve, no "
     "completed-grid refusal, no closing-cost requirement, no symbol-valuation "
-    "check — a grid is placed whenever the book is empty and the candle turns",
+    "check — a grid is placed whenever the book is empty",
     "the basket target is judged on GROSS profit: swap and commission are not "
     "in the number that triggers a close, and nothing is reserved for the exit",
     "the halt is not durable: it lives in memory and pressing Start clears it, "
@@ -88,7 +93,7 @@ class _NoDayRisk:
         return {
             "available": False,
             "reason": (
-                "the 2 September engine does not compute a marked daily risk reading: "
+                "this engine does not compute a marked daily risk reading: "
                 "its daily limit is judged on realised results and equity drawdown"
             ),
             "settled_realized": None,
@@ -101,12 +106,9 @@ class _NoDayRisk:
 
 
 class OriginalEngine(OriginalGridEngine):
-    """The 2 September engine, wearing today's reporting surface."""
+    """The original engine, wearing today's reporting surface."""
 
     profile = PROFILE_KEY
-
-    #: See point 4 in the module docstring.
-    _account_id = "legacy"
 
     def __init__(self, *args, **kwargs):
         # Accepted and discarded, by name, so a caller that builds either engine
@@ -158,7 +160,7 @@ class OriginalEngine(OriginalGridEngine):
         return True, "Management stopped. The broker reports no positions or orders for this bot."
 
     _NO_PAUSE = (
-        "The 2 September engine has no owner pause: it is the bot as it was before one existed. "
+        "The original engine has no owner pause: it is the bot as it was before one existed. "
         "Stop ends the management loop, and anything open at the broker stays open and unmanaged. "
         "Switch to the guarded engine for pause, resume and close-and-pause."
     )
@@ -296,7 +298,7 @@ class OriginalEngine(OriginalGridEngine):
     def session_label(self) -> str:
         """How the trading window reads to the owner, in the configured clock.
 
-        The 2 September engine has `_within_session` but never named the window
+        This engine has `_within_session` but never named the window
         for the dashboard. Note what it does NOT have: that check reads the
         machine's UTC hour directly, where today's engine converts into the
         configured timezone first. The label says UTC here because that is what
@@ -312,7 +314,7 @@ class OriginalEngine(OriginalGridEngine):
             "engine_profile": PROFILE_KEY,
             "engine_profile_summary": PROFILE_SUMMARY,
             "engine_profile_missing": list(PROFILE_MISSING),
-            "engine_profile_source_commit": "5aff68a",
+            "engine_profile_source_commit": "1c7d62d",
             "settings_not_applied": sorted(self.ignored_settings),
         }
 

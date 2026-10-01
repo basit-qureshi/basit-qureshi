@@ -69,12 +69,12 @@ GUARDED_PROFILE = EngineProfile(
 
 ORIGINAL_PROFILE = EngineProfile(
     key=ORIGINAL,
-    label="Original bot (2 Sep 2026)",
+    label="Original bot (no gate)",
     summary=(
-        "The bot as it was at commit 5aff68a, taken from git rather than "
-        "rewritten. It has no entry gate at all: a grid is placed whenever "
-        "nothing of this bot's is open and the next M1 candle has arrived. It "
-        "is what produced the trade history already in this database."
+        "The bot as it was at commit 1c7d62d, before the risk work started, "
+        "taken from git rather than rewritten. No entry gate of any kind, and a "
+        "profitable basket is replaced on the same candle that closed it. It is "
+        "what produced the trade history already in this database."
     ),
     adds=(),
     guarded=False,
@@ -83,11 +83,11 @@ ORIGINAL_PROFILE = EngineProfile(
 ALL_PROFILES = {p.key: p for p in (GUARDED_PROFILE, ORIGINAL_PROFILE)}
 
 #: The engine a fresh install runs. It is the ORIGINAL one, chosen by the owner:
-#: they asked for the bot they had on 2 September, without the capital floor and
-#: the capital reserve that refuse a grid on a small account. `normalise` below
-#: still resolves an UNRECOGNISED value to the guarded engine rather than to
-#: this one, because a typo in a settings file is not that choice being made
-#: again.
+#: they asked for the bot they had before the risk work, without the capital
+#: floor and the capital reserve that refuse a grid on a small account, and with
+#: the same-candle restart after a profitable basket. `normalise` below still
+#: resolves an UNRECOGNISED value to the guarded engine rather than to this one,
+#: because a typo in a settings file is not that choice being made again.
 DEFAULT_PROFILE = ORIGINAL
 
 

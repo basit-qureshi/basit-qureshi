@@ -1,26 +1,34 @@
-"""The bot as it was on 2 September 2026 - the simple grid, with no entry gate.
+"""The bot as it was before the risk work started - the simple grid, no gate.
 
 Provenance. Everything below the next docstring is this repository's
-`backend/app/engine/grid_engine.py` at commit `5aff68a` ("Gate every grid build
-on a confirmed next M1 candle, add a daily profit target", 2026-09-02), taken
-from git rather than retyped. Exactly two things were changed: the class is
-named `OriginalGridEngine` so both engines can be imported at once, and this
-header was added. No decision, threshold, order or arithmetic was touched, and
-`tests/test_engine_profiles.py` reverses both edits and diffs the result against
-the commit, so this copy cannot drift.
+`backend/app/engine/grid_engine.py` at commit `1c7d62d` ("Restore original grid
+settings, restart after profit on the same candle, and display PKT",
+2026-09-15), taken from git rather than retyped. Exactly two things were
+changed: the class is named `OriginalGridEngine` so both engines can be imported
+at once, and this header was added. No decision, threshold, order or arithmetic
+was touched, and `tests/test_engine_profiles.py` reverses both edits and diffs
+the result against the commit, so this copy cannot drift.
 
-Why this commit and not a later one. The capital reserve, the completed-grid
-refusal and the whole `_entry_gate` arrived in `0b86408` on 20 September. This
-file predates all of them: it has no `_entry_gate`, no `_affordability`, no
-`capital_reserve_percent`, no capital floor, and no closing-cost contract. A
-grid is placed whenever nothing of this bot's is left and the next M1 candle has
-arrived - there is nothing else to satisfy.
+Why this commit. Two properties the owner named, and only this commit has both:
+
+* **No entry gate.** `_entry_gate`, `_affordability`, the capital reserve and
+  the completed-grid refusal all arrive in `0b86408` on 20 September. Nothing
+  here refuses a grid for being large relative to the account.
+* **Same-candle restart after a profitable basket.** `_profit_restart_pending`
+  lets the replacement grid be built in the same tick that confirmed the close,
+  instead of waiting for the next M1 candle. The 2 September engine (`5aff68a`)
+  does NOT do this - it arms the candle gate after every close, profitable or
+  not - which is why that commit was the wrong one.
+
+Startup, a manually removed grid and a loss exit still wait for the next
+candle. Only the profitable restart skips it.
 
 What that leaves, in its own words (see the strategy docstring below): the only
 things that end a losing basket are `max_daily_loss_usd`,
 `max_equity_drawdown_percent` and the optional `basket_stop_loss_usd`. There is
 no per-trade stop. The basket target is judged on GROSS position profit, so swap
-and commission are not inside the number that triggers a close.
+and commission are not inside the number that triggers a close, and the halt is
+kept in memory only - `start()` clears it.
 
 What runs it. `app.engine.original_adapter.OriginalEngine`, a subclass that adds
 the reporting surface today's API and dashboard call. The subclass overrides no
@@ -57,6 +65,7 @@ basket_stop_loss_usd. They are the whole risk model, not decoration.
 
 import asyncio
 import logging
+import time
 from datetime import date, datetime, timezone
 from typing import Callable, Optional
 
@@ -92,6 +101,11 @@ class OriginalGridEngine:
         timezone_name: str = "Asia/Karachi",
         on_update: Optional[Callable[[dict], None]] = None,
     ):
+        self._account_id = "legacy"
+        self._last_history_sync = 0.0
+        self._history_ready = False
+        self._profit_exit_reason = None
+        self._profit_restart_pending = False
         self.broker = broker
         self.symbol = symbol
         self.mode = mode
@@ -127,9 +141,9 @@ class OriginalGridEngine:
         self._halt_reason: str | None = None
         self._known_tickets: set[str] = set()
         self._hedge_warned: int | None = None
-        # The strict next-M1-candle gate. `_gate_anchor` is the candle stamp the
-        # engine became ready to build on; no grid is placed until the broker
-        # reports a strictly later one. `_gate_reason` is what armed it, so the
+        # Startup, manual removal and loss exits use this next-M1 gate.
+        # Profitable basket replacement bypasses it after confirmed closure.
+        # `_gate_anchor` is the candle stamp the engine became ready on. `_gate_reason` is what armed it, so the
         # dashboard can say why it is waiting rather than looking stalled.
         self._gate_anchor = None
         self._gate_reason: str | None = None
@@ -188,17 +202,20 @@ class OriginalGridEngine:
 
     def _tick(self) -> None:
         account = self.broker.get_account_info()
+        self._bind_account(account)
         positions = self.broker.get_open_positions(self.symbol, magic=self.magic_number)
         pendings = self.broker.get_pending_orders(self.symbol, magic=self.magic_number)
         candle = self._current_candle_time()
         self._roll_day(account.equity, candle)
         self._record_new_fills(positions, candle)
+        self._settle_closed_trades()
+        self._sync_broker_history()
 
         # A grid that was there last poll and is gone now, with nothing filled,
         # was removed outside the bot — deleted by hand in MT5, or expired. The
         # rebuild goes through the same next-candle gate as any other rebuild
         # rather than snapping back on the spot.
-        if self._had_grid and not positions and not pendings and self._gate_anchor is None:
+        if self._had_grid and not positions and not pendings and self._gate_anchor is None and not self._profit_restart_pending:
             self._arm_gate("Grid orders removed", candle)
         self._had_grid = bool(positions or pendings)
 
@@ -219,16 +236,29 @@ class OriginalGridEngine:
             self._broadcast(account, positions, pendings, basket_profit, hedged=hedged)
             return
 
-        if positions:
-            # The target is a floor, not a window: the spec is explicit that a
-            # basket at 9.99 stays open and one at 10.00 or better closes.
-            if basket_profit >= self.basket_take_profit_usd:
-                self._close_everything(positions, pendings, f"target reached (+{basket_profit:.2f})")
-                self._baskets_won += 1
-                self._arm_gate("Basket closed")
-                account = self.broker.get_account_info()
-                self._broadcast(account, [], self._current_pendings(), 0.0)
+        # Keep closing an earned profit cycle until the old basket is flat.
+        # The replacement is built below in this same tick, without a candle gate.
+        if self._profit_exit_reason or (positions and basket_profit >= self.basket_take_profit_usd):
+            self._profit_exit_reason = self._profit_exit_reason or f"target reached (+{basket_profit:.2f})"
+            self._close_everything(positions, pendings, self._profit_exit_reason)
+            positions = self.broker.get_open_positions(self.symbol, magic=self.magic_number)
+            pendings = self._current_pendings()
+            account = self.broker.get_account_info()
+            basket_profit = round(sum(p.profit or 0.0 for p in positions), 2)
+            if positions or pendings:
+                self._broadcast(account, positions, pendings, basket_profit, note="Closing profitable basket")
                 return
+            self._baskets_won += 1
+            self._profit_exit_reason = None
+            self._profit_restart_pending = True
+            self._gate_anchor = self._gate_reason = None
+            self._had_grid = False
+            hedged = False
+            if self._check_risk_limits(account, positions, pendings):
+                self._broadcast(account, positions, pendings, basket_profit)
+                return
+
+        if positions:
             if self.basket_stop_loss_usd > 0 and basket_profit <= -self.basket_stop_loss_usd:
                 self._close_everything(positions, pendings, f"basket stop hit ({basket_profit:.2f})")
                 self._baskets_stopped += 1
@@ -287,12 +317,17 @@ class OriginalGridEngine:
                     hedged=hedged,
                 )
                 return
-            ready, note = self._gate_status(candle)
+            if self._profit_restart_pending:
+                ready, note = candle is not None, "Waiting for readable M1 data"
+            else:
+                ready, note = self._gate_status(candle)
             if not ready:
                 self._broadcast(account, positions, pendings, basket_profit, note=note, hedged=hedged)
                 return
             self._build_grid()
+            self._profit_restart_pending = False
             pendings = self._current_pendings()
+            self._had_grid = bool(pendings)
 
         self._broadcast(account, positions, pendings, basket_profit, hedged=hedged)
 
@@ -345,6 +380,14 @@ class OriginalGridEngine:
         would fill into the next one and corrupt its profit total."""
         logger.info("closing basket: %s", reason)
         realized = 0.0
+        for order in pendings:
+            try:
+                self.broker.cancel_pending_order(order.ticket)
+            except Exception:
+                logger.exception("Pending cancellation will be retried")
+        positions = self.broker.get_open_positions(self.symbol, magic=self.magic_number)
+        self._record_new_fills(positions)
+        pendings = self._current_pendings()
         for p in positions:
             try:
                 realized += self.broker.close_position(p.ticket) or 0.0
@@ -362,6 +405,7 @@ class OriginalGridEngine:
         leftover_positions = self.broker.get_open_positions(self.symbol, magic=self.magic_number)
         leftover_orders = self.broker.get_pending_orders(self.symbol, magic=self.magic_number)
         if leftover_positions or leftover_orders:
+            self._record_new_fills(leftover_positions)
             # Retry once: a stop can fill in the moment between closing and
             # cancelling, which leaves a position the first pass never saw.
             for p in leftover_positions:
@@ -470,7 +514,7 @@ class OriginalGridEngine:
             return bool(self.broker.get_pending_orders(self.symbol, magic=self.magic_number))
         except Exception:
             logger.exception("could not read existing bot state")
-            return False
+            raise
 
     # ----------------------------------------------------- daily accounting
 
@@ -495,7 +539,7 @@ class OriginalGridEngine:
         if self._trading_day is None:
             self._daily_totals = None
             return None
-        self._daily_totals = db_module.daily_totals(self.symbol, self.mode, self.magic_number, self._trading_day)
+        self._daily_totals = db_module.daily_totals(self.symbol, self.mode, self.magic_number, self._trading_day, self._account_id)
         return self._daily_totals
 
     def daily_net(self) -> float:
@@ -544,12 +588,7 @@ class OriginalGridEngine:
         return True
 
     def _current_pendings(self):
-        try:
-            return self.broker.get_pending_orders(self.symbol, magic=self.magic_number)
-        except Exception:
-            return []
-
-    # ------------------------------------------------------------------ risk
+        return self.broker.get_pending_orders(self.symbol, magic=self.magic_number)
 
     def _roll_day(self, equity: float, candle) -> None:
         """Rolls the day on the broker's own candle stamp, not the machine clock.
@@ -569,6 +608,7 @@ class OriginalGridEngine:
             self._halt_reason = None
             self._daily_target_hit = False
             if not first_day:
+                self._profit_restart_pending = False
                 logger.info("new broker trading day %s — daily counters and target lock reset", day)
                 self._arm_gate("New trading day", candle)
         self._refresh_daily_totals()
@@ -609,21 +649,30 @@ class OriginalGridEngine:
     # ------------------------------------------------------- trade recording
 
     def _record_new_fills(self, positions: list[Position], candle=None) -> None:
-        live = {p.ticket for p in positions}
+        live = {p.identifier or p.ticket for p in positions}
         for p in positions:
-            if p.ticket in self._known_tickets:
+            key = p.identifier or p.ticket
+            if key in self._known_tickets:
                 continue
-            self._known_tickets.add(p.ticket)
             logger.info("%s STOP triggered: %s %.2f lots at %.2f", p.side.value, p.ticket, p.volume, p.open_price)
             with db_module.SessionLocal() as session:
+                existing = session.query(TradeRecord).filter_by(
+                    account_id=self._account_id, ticket=key
+                ).filter(TradeRecord.status != "DUPLICATE").first()
+                if existing:
+                    self._known_tickets.add(key)
+                    continue
                 session.add(
                     TradeRecord(
-                        ticket=p.ticket, symbol=p.symbol, side=p.side.value, volume=p.volume,
+                        account_id=self._account_id,
+                        ticket=key, symbol=p.symbol, side=p.side.value, volume=p.volume,
                         open_price=p.open_price, sl=p.sl, tp=p.tp, mode=self.mode, status="OPEN",
+                        open_time=datetime.fromisoformat(p.open_time),
                         magic=self.magic_number, trading_day=self._trading_day,
                     )
                 )
                 session.commit()
+                self._known_tickets.add(key)
         gone = self._known_tickets - live
         if gone:
             self._settle_closed_trades()
@@ -631,13 +680,19 @@ class OriginalGridEngine:
     def _settle_closed_trades(self) -> None:
         """Marks tickets the broker no longer reports as open, using the broker's
         own realized figure so the dashboard matches the account history."""
-        live = {p.ticket for p in self.broker.get_open_positions(self.symbol, magic=self.magic_number)}
-        closed = self._known_tickets - live
+        live = {p.identifier or p.ticket for p in self.broker.get_open_positions(self.symbol, magic=self.magic_number)}
+        with db_module.SessionLocal() as session:
+            pending = session.query(TradeRecord).filter(
+                TradeRecord.account_id == self._account_id,
+                TradeRecord.symbol == self.symbol, TradeRecord.magic == self.magic_number,
+                (TradeRecord.status == "OPEN") | ((TradeRecord.status == "CLOSED") & TradeRecord.profit.is_(None)),
+            ).all()
+            closed = {r.ticket for r in pending} - live
         if not closed:
             return
         with db_module.SessionLocal() as session:
             for ticket in closed:
-                record = session.query(TradeRecord).filter_by(ticket=ticket, status="OPEN").first()
+                record = session.query(TradeRecord).filter_by(account_id=self._account_id, ticket=ticket).filter(TradeRecord.status != "DUPLICATE").first()
                 if record:
                     try:
                         profit = self.broker.get_realized_profit(ticket)
@@ -649,12 +704,47 @@ class OriginalGridEngine:
                     record.magic = self.magic_number
                     # Stamped at settlement from the broker's candle, so the
                     # day a trade counts towards never shifts afterwards.
-                    record.trading_day = self._trading_day
+                    settled_at = self.broker.get_settlement_time(ticket) if hasattr(self.broker, "get_settlement_time") else None
+                    record.close_time = settled_at or record.close_time
+                    record.trading_day = self._trading_day_for(settled_at) if settled_at else self._trading_day
                 self._known_tickets.discard(ticket)
             session.commit()
         self._refresh_daily_totals()
 
+    def _sync_broker_history(self):
+        if not hasattr(self.broker, "history_records") or (self._history_ready and time.monotonic() - self._last_history_sync < getattr(self.broker, "history_sync_interval", 30)):
+            return
+        rows = self.broker.history_records(self.symbol, self.magic_number)
+        with db_module.SessionLocal() as session:
+            for item in rows:
+                record = session.query(TradeRecord).filter_by(
+                    account_id=self._account_id, ticket=item["ticket"]
+                ).filter(TradeRecord.status != "DUPLICATE").first()
+                if record is None:
+                    record = TradeRecord(account_id=self._account_id, mode=self.mode,
+                                         magic=self.magic_number, sl=0, tp=0, **item)
+                    session.add(record)
+                else:
+                    for name, value in item.items():
+                        setattr(record, name, value)
+                record.status = "CLOSED"
+                record.trading_day = self._trading_day_for(item["close_time"])
+            session.commit()
+        if hasattr(self.broker, "acknowledge_history"):
+            self.broker.acknowledge_history()
+        self._history_ready = True
+        self._last_history_sync = time.monotonic()
+        self._refresh_daily_totals()
+
     # ------------------------------------------------------------- reporting
+
+    def _bind_account(self, account):
+        identity = getattr(account, "account_id", "legacy")
+        if identity != self._account_id:
+            self._account_id = identity
+            self._known_tickets.clear()
+            self._daily_totals = None
+            self._history_ready = False
 
     def _broadcast(
         self, account, positions, pendings, basket_profit: float, note: str | None = None,
@@ -673,6 +763,7 @@ class OriginalGridEngine:
                     {
                         "ticket": p.ticket, "symbol": p.symbol, "side": p.side.value,
                         "volume": p.volume, "open_price": p.open_price, "profit": p.profit,
+                        "open_time": p.open_time,
                     }
                     for p in positions
                 ],
@@ -712,6 +803,9 @@ class OriginalGridEngine:
             "strategy_name": "GridEngine",
             "structural": False,
             "grid_mode": True,
+            "account_id": self._account_id,
+            "profit_restart": "same_candle",
+            "closing_profit_basket": bool(self._profit_exit_reason),
             "halted": self._halt_reason,
             "baskets_won": self._baskets_won,
             "baskets_stopped": self._baskets_stopped,
@@ -733,7 +827,9 @@ class OriginalGridEngine:
         resolves the trading day itself when asked while the bot is stopped,
         so the cards are right before the first tick as well as after it.
         """
-        totals = self._daily_totals
+        if self.broker.is_connected():
+            self._bind_account(self.broker.get_account_info())
+        totals = self._refresh_daily_totals()
         if totals is None:
             if self._trading_day is None:
                 self._trading_day = self._trading_day_for(self._current_candle_time())

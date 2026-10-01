@@ -2,10 +2,10 @@ import { useEffect, useState } from "react";
 import ConfirmModal from "./ConfirmModal";
 
 /**
- * Which engine drives the account: the 2 September bot, or the guarded one.
+ * Which engine drives the account: the original bot, or the guarded one.
  *
- * The app starts on the 2 September bot, because that is what the owner asked
- * to be running. The guarded engine is the opt-in.
+ * The app starts on the original bot, because that is what the owner asked to
+ * be running. The guarded engine is the opt-in.
  *
  * The toggle is two buttons rather than a switch on purpose. A switch invites
  * being flipped to see what happens; these are labelled with what each side
@@ -43,7 +43,7 @@ export default function EngineProfileToggle({ status, busy, onSwitch }) {
   const missing = status.engine_profile_missing || [];
   const notApplied = status.settings_not_applied || [];
   const profiles = catalog?.profiles || [
-    { key: "original", label: "Original bot (2 Sep 2026)", adds: [] },
+    { key: "original", label: "Original bot (no gate)", adds: [] },
     { key: "guarded", label: "Guarded engine (current)", adds: [] },
   ];
 
@@ -69,9 +69,9 @@ export default function EngineProfileToggle({ status, busy, onSwitch }) {
     <div className="panel engine-profile">
       <h3>Engine</h3>
       <p className="muted">
-        The grid is identical in both: same levels, same spacing, same lot, same basket target,
-        same next-candle gate. What changes is what stands in front of it — not what it trades.
-        The app starts on the 2 September bot, which has nothing in front of it at all.
+        The grid is identical in both: same levels, same spacing, same lot, same basket target.
+        What changes is what stands in front of it — not what it trades. The app starts on the
+        original bot, which has nothing in front of it at all.
       </p>
 
       <div className="engine-profile-choices">
@@ -96,7 +96,7 @@ export default function EngineProfileToggle({ status, busy, onSwitch }) {
 
       {active === "original" && (
         <div className="engine-profile-warning">
-          <strong>⚠ Running the 2 September bot.</strong> It does not have:
+          <strong>⚠ Running the original bot.</strong> It does not have:
           <ul>
             {missing.map((line) => (
               <li key={line}>{line}</li>
@@ -116,16 +116,17 @@ export default function EngineProfileToggle({ status, busy, onSwitch }) {
 
       {pending && (
         <ConfirmModal
-          title="Run the 2 September bot?"
+          title="Run the original bot?"
           message={
-            "This is the bot exactly as it was on 2 September 2026. It has NO entry gate: no capital " +
-            "floor, no capital reserve, no completed-grid refusal, no closing-cost requirement. A grid " +
-            "is placed whenever nothing of this bot's is open and the next M1 candle arrives. Its " +
+            "This is the bot exactly as it was before the risk work (commit 1c7d62d). It has NO entry " +
+            "gate: no capital floor, no capital reserve, no completed-grid refusal, no closing-cost " +
+            "requirement. A profitable basket is replaced on the same candle that closed it. Its " +
             "basket target is judged on gross profit, so swap and commission are not in the number " +
             "that triggers a close, and its halt is not durable — pressing Start clears it. The grid " +
-            "it places is identical to the guarded engine's. Neither has been shown to be profitable."
+            "it places is identical to the guarded engine's. Neither has been measured against the " +
+            "other."
           }
-          confirmLabel="Yes, run the 2 September bot"
+          confirmLabel="Yes, run the original bot"
           danger
           onConfirm={() => {
             choose(pending);

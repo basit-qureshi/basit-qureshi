@@ -28,7 +28,7 @@ from app.engine.original_engine import OriginalGridEngine
 from tests.conftest import MAGIC, FakeBroker
 
 REPO = Path(__file__).resolve().parents[2]
-PINNED_COMMIT = "5aff68a"
+PINNED_COMMIT = "1c7d62d"
 ORIGINAL_FILE = REPO / "backend" / "app" / "engine" / "original_engine.py"
 
 
@@ -63,10 +63,11 @@ def test_the_vendored_file_is_the_pinned_commit_with_two_known_edits():
     assert body.replace("class OriginalGridEngine:", "class GridEngine:") == original
 
 
-def test_the_header_names_the_commit_and_the_date():
-    head = ORIGINAL_FILE.read_text()[:2500]
+def test_the_header_names_the_commit_and_what_it_was_chosen_for():
+    head = ORIGINAL_FILE.read_text()[:3000]
     assert PINNED_COMMIT in head
-    assert "2 September" in head
+    assert "Same-candle restart" in head
+    assert "5aff68a" in head, "the header should say why the 2 September commit was rejected"
     assert "original_adapter" in head
 
 
@@ -105,6 +106,8 @@ STRATEGY_METHODS = (
     "_current_pendings",
     "_record_new_fills",
     "_settle_closed_trades",
+    "_sync_broker_history",
+    "_bind_account",
     "_refresh_daily_totals",
     "_trading_day_for",
 )
@@ -222,6 +225,46 @@ def test_the_original_trades_the_account_the_guarded_engine_refuses():
     assert len(broker.get_pending_orders("XAUUSD", magic=MAGIC)) == 20
 
 
+def test_the_original_restarts_on_the_SAME_candle_after_a_profit(original_engine_factory, broker):
+    """The property this commit was chosen for, and the one 5aff68a lacks.
+
+    A basket reaches its target and closes. The replacement grid must appear in
+    the same tick, without the candle advancing — startup and loss exits still
+    wait, but a profitable restart does not.
+    """
+    engine = original_engine_factory(basket_take_profit_usd=1.0, lot_size=0.01,
+                                     buy_stop_levels=1, sell_stop_levels=1,
+                                     grid_distance=0.30)
+    engine._tick()
+    broker.next_candle()
+    engine._tick()
+    assert len(broker.get_pending_orders("XAUUSD", magic=MAGIC)) == 2
+
+    broker.price = 4000.50                    # fills the buy stop
+    engine._tick()
+    assert broker.get_open_positions("XAUUSD", magic=MAGIC)
+
+    broker.price = 4200.0                     # far past the $1.00 target
+    candle_before = broker.candle_time
+    engine._tick()                            # closes, and rebuilds in the same tick
+
+    assert broker.candle_time == candle_before, "the test must not advance the candle itself"
+    assert broker.get_open_positions("XAUUSD", magic=MAGIC) == []
+    assert len(broker.get_pending_orders("XAUUSD", magic=MAGIC)) == 2, (
+        "the replacement grid should be resting already, on the same candle")
+    assert engine.status()["profit_restart"] == "same_candle"
+
+
+def test_the_original_still_waits_for_the_next_candle_at_startup(original_engine_factory, broker):
+    """Only the profitable restart skips the gate. Startup does not."""
+    engine = original_engine_factory()
+    engine._tick()
+    assert broker.get_pending_orders("XAUUSD", magic=MAGIC) == []
+    broker.next_candle()
+    engine._tick()
+    assert broker.get_pending_orders("XAUUSD", magic=MAGIC)
+
+
 def test_the_original_judges_the_basket_on_gross_profit(original_engine_factory, broker):
     """Swap and commission are not inside the number that triggers a close."""
     engine = original_engine_factory(basket_take_profit_usd=2.0)
@@ -252,12 +295,10 @@ def test_clearing_a_halt_that_was_never_set_says_so(original_engine_factory):
     assert ok is True and message == "No halt was set."
 
 
-def test_the_original_records_trades_in_the_bucket_it_writes(original_engine_factory, broker):
-    """Pinned to `legacy`, which is where the vendored engine's rows land and
-    where the existing trade history already is."""
+def test_the_original_records_trades_under_the_broker_identity(original_engine_factory, broker):
+    """This commit already binds and stamps the account id, so the dashboard
+    reads the same bucket the engine writes."""
     engine = original_engine_factory()
-    assert engine._account_id == "legacy"
-
     engine._tick()
     broker.next_candle()
     engine._tick()                  # the grid is built here, at 4000
@@ -269,14 +310,14 @@ def test_the_original_records_trades_in_the_bucket_it_writes(original_engine_fac
     with db_module.SessionLocal() as session:
         rows = session.query(TradeRecord).filter_by(magic=MAGIC).all()
     assert rows, "no fills were recorded"
-    assert {r.account_id for r in rows} == {"legacy"}
+    assert {r.account_id for r in rows} == {engine._account_id}
 
 
 def test_the_original_reports_what_it_is_not_running(original_engine_factory):
     report = original_engine_factory(capital_floor_usd=170.0,
                                      capital_reserve_percent=50.0).status()
     assert report["engine_profile"] == "original"
-    assert report["engine_profile_source_commit"] == "5aff68a"
+    assert report["engine_profile_source_commit"] == "1c7d62d"
     assert "capital_floor_usd" in report["settings_not_applied"]
     assert "capital_reserve_percent" in report["settings_not_applied"]
     assert report["capital_floor_usd"] is None
@@ -423,7 +464,7 @@ def test_the_account_check_is_the_same_in_both_engines(original_engine_factory, 
 # --------------------------------------------------------- profile selection
 
 def test_the_default_engine_is_the_original_one():
-    """The owner asked for the 2 September bot to be what the app runs."""
+    """The owner asked for the pre-risk-work bot to be what the app runs."""
     from app.config import settings
 
     assert engine_profiles.DEFAULT_PROFILE == "original"
@@ -442,9 +483,18 @@ def test_a_recognised_profile_is_accepted_whatever_its_casing(value, expected):
     assert engine_profiles.normalise(value) == expected
 
 
-def test_the_registry_describes_both_and_claims_nothing_about_profit():
-    text = " ".join(p.summary + " ".join(p.adds) for p in engine_profiles.ALL_PROFILES.values())
-    assert "profitab" not in text.lower()
+#: Phrases that would be a performance claim. "a profitable basket" is not one —
+#: it names a mechanism — so the check looks for the comparison, not the word.
+PERFORMANCE_CLAIMS = (
+    "more profitable", "profitable strategy", "makes money", "outperform",
+    "better than", "recommended", "proven", "win rate", "profit factor",
+)
+
+
+def test_the_registry_describes_both_and_claims_nothing_about_performance():
+    text = " ".join(p.summary + " ".join(p.adds) for p in engine_profiles.ALL_PROFILES.values()).lower()
+    for claim in PERFORMANCE_CLAIMS:
+        assert claim not in text, claim
     assert engine_profiles.GUARDED_PROFILE.guarded is True
     assert engine_profiles.ORIGINAL_PROFILE.guarded is False
-    assert "2 Sep" in engine_profiles.ORIGINAL_PROFILE.label
+    assert "no gate" in engine_profiles.ORIGINAL_PROFILE.label
